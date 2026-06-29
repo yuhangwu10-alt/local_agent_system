@@ -1,0 +1,49 @@
+name: fangzhi
+
+services:
+  postgres:
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/postgres:16-alpine
+    environment:
+      POSTGRES_DB: fangzhi
+      POSTGRES_USER: fangzhi
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-fangzhi123}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fangzhi"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    volumes:
+      - ./backend:/app
+      - ./static:/app/static
+      - ./storage:/app/storage
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://fangzhi:fangzhi123@postgres:5432/fangzhi
+      - STORAGE_PATH=/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # frontend:
+  #   build: ./frontend
+  #   ports:
+  #     - "3000:3000"
+  #   depends_on:
+  #     - backend
+
+volumes:
+  pgdata:

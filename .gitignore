@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+.claude/
+.cursor/
+*.swp
+*.swo
+
+# Storage (runtime data)
+storage/input/*
+storage/exports/*
+storage/page_images/*
+!storage/input/.gitkeep
+!storage/exports/.gitkeep
+!storage/page_images/.gitkeep
+
+# Docker
+pgdata/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+frontend/dist/

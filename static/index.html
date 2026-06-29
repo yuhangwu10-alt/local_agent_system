@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>多语言古籍专题页池及叙事单元提取系统</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260607-topic-row-compact" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="seal" aria-hidden="true">志</div>
+        <div class="brand-copy">
+          <span class="eyebrow">Local Research Agent</span>
+          <h1>多语言古籍专题页池及叙事单元提取系统</h1>
+          <p>上传、OCR、专题确认、页面池评分、叙事单元抽取与结果导出</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span class="status-pill"><span class="dot"></span>本地 Docker 运行</span>
+        <button id="refreshBtn" class="ghost-btn" type="button" title="刷新文档和任务状态">刷新</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="panel input-panel" aria-label="资料输入">
+        <div class="panel-header">
+          <div>
+            <span class="section-kicker">Input</span>
+            <h2>资料输入</h2>
+            <span id="limitText">支持 PDF / XLSX，最大 500MB</span>
+          </div>
+        </div>
+
+        <div class="panel-body">
+          <div class="upload-card">
+            <div class="upload-tabs" role="tablist" aria-label="上传类型">
+              <button class="tab active" data-type="pdf" type="button">PDF 古籍</button>
+              <button class="tab" data-type="excel" type="button">Excel 页面集</button>
+            </div>
+
+            <label class="dropzone" id="dropzone">
+              <input id="fileInput" type="file" accept=".pdf" />
+              <span class="dropzone-mark" aria-hidden="true">+</span>
+              <strong id="uploadTitle">点击上传 PDF</strong>
+              <span id="uploadHint">PDF 上传后执行 OCR；Excel 上传后执行页面导入。</span>
+            </label>
+          </div>
+
+          <div class="ocr-config">
+            <div class="data-head">
+              <strong>模型与并发</strong>
+              <span>分别配置 OCR 和文本处理模型</span>
+            </div>
+            <div class="config-inline">
+              <label class="batch-label">
+                <span>OCR 批次</span>
+                <input id="ocrBatchSize" type="number" min="1" max="50" value="1" />
+              </label>
+              <label class="batch-label">
+                <span>处理并发</span>
+                <input id="classifyConcurrency" type="number" min="1" value="5" />
+              </label>
+              <label class="batch-label">
+                <span>专题批次</span>
+                <input id="topicBatchSize" type="number" min="10" max="500" value="100" />
+              </label>
+            </div>
+            <div class="model-config-buttons">
+              <button type="button" class="model-config-btn" id="ocrModelBtn" onclick="openModelModal('ocr')">
+                <span class="btn-icon" aria-hidden="true">OCR</span>
+                <span class="btn-body">
+                  <span class="btn-label">OCR 模型</span>
+                  <span class="btn-status" id="ocrModelStatus">未配置</span>
+                </span>
+                <span class="btn-arrow" aria-hidden="true">›</span>
+              </button>
+              <button type="button" class="model-config-btn" id="llmModelBtn" onclick="openModelModal('llm')">
+                <span class="btn-icon" aria-hidden="true">AI</span>
+                <span class="btn-body">
+                  <span class="btn-label">文本处理模型</span>
+                  <span class="btn-status" id="llmModelStatus">未配置</span>
+                </span>
+                <span class="btn-arrow" aria-hidden="true">›</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="file-section">
+            <div class="data-head">
+              <strong>文档队列</strong>
+              <span>选择一个文档后继续处理</span>
+            </div>
+            <div class="file-list" id="fileList">
+              <div class="note">暂无文件。请上传 PDF 或 Excel。</div>
+            </div>
+          </div>
+
+          <div class="data-box">
+            <div class="data-head">
+              <strong>处理流程</strong>
+              <span id="workflowStatus">等待上传文件</span>
+            </div>
+            <div id="progressPanel" class="progress-panel" style="display:none">
+              <div class="progress-info">
+                <span id="progressLabel">处理中</span>
+                <span id="progressCount">0/0</span>
+              </div>
+              <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+            </div>
+            <div class="step-list">
+              <div class="step" data-step="upload">上传 PDF / Excel</div>
+              <div class="step" data-step="ocr">OCR 识别并生成底表</div>
+              <div class="step" data-step="topic">发现与确认专题</div>
+              <div class="step" data-step="pool">页面池评分</div>
+              <div class="step" data-step="narrative">叙事单元提取</div>
+              <div class="step" data-step="export">导出与下载</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel chat-panel" aria-label="智能体对话">
+        <div class="panel-header">
+          <div>
+            <span class="section-kicker">Agent</span>
+            <h2>智能体对话</h2>
+            <span>让 AI 建议专题，再确认并选择要处理的专题</span>
+          </div>
+          <div class="chat-toolbar">
+            <button id="newChatBtn" type="button">新建</button>
+            <button id="historyChatBtn" type="button">历史</button>
+            <span id="currentSessionTitle"></span>
+          </div>
+        </div>
+
+        <div id="messages" class="messages">
+          <div class="msg">
+            <div class="avatar">智</div>
+            <div class="bubble">
+              请先上传 PDF 或 Excel，并完成 OCR/页面导入。完成后系统会生成底表下载入口。随后你可以让我根据页面内容分析可研究专题，也可以直接输入专题，确认后再选择专题生成专题总表、页面池和叙事单元。
+            </div>
+          </div>
+        </div>
+
+        <div class="topic-box">
+          <div class="data-head">
+            <strong>已确认专题</strong>
+            <span>勾选后可批量处理</span>
+          </div>
+          <div id="topicList" class="topic-list"></div>
+          <div class="topic-actions">
+            <button id="extractTopicsBtn" type="button">AI 批量提取专题</button>
+            <button id="cancelExtractTopicsBtn" class="btn-cancel" type="button" style="display:none">停止专题提取</button>
+            <button id="runTopicBtn" type="button">处理选中专题</button>
+            <button id="cancelRunTopicBtn" class="btn-cancel" type="button" style="display:none">停止处理</button>
+          </div>
+        </div>
+
+        <div class="composer">
+          <textarea id="chatInput" placeholder="可先问 AI：请分析有哪些专题。手动添加专题请点击右侧按钮。"></textarea>
+          <div class="composer-actions">
+            <button id="discussBtn" type="button">发送给 AI</button>
+            <button id="confirmBtn" type="button">添加专题</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel output-panel" aria-label="文件输出">
+        <div class="panel-header">
+          <div>
+            <span class="section-kicker">Output</span>
+            <h2>文件输出</h2>
+            <span>生成结果只下载，不预览</span>
+          </div>
+        </div>
+
+        <div class="panel-body">
+          <div class="output-dir">
+            <label>保存文件夹</label>
+            <div class="dir-picker">
+              <button id="chooseOutputDirBtn" type="button">选择文件夹</button>
+              <span id="outputDirText">下载前请选择保存文件夹</span>
+            </div>
+          </div>
+          <div id="outputList" class="output-list"></div>
+          <div class="note">
+            专题结果每个专题只显示一个 ZIP。点击下载前请选择保存文件夹，系统会自动保存到该文件夹；如浏览器不支持选择文件夹，会退回到普通下载。
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-overlay" id="historyModal" style="display:none">
+    <div class="modal-card">
+      <div class="modal-header">
+        <strong>历史对话</strong>
+        <button type="button" class="modal-close" onclick="closeHistoryModal()" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body" id="historyList"></div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="manualTopicModal" style="display:none">
+    <div class="modal-card manual-topic-modal">
+      <div class="modal-header">
+        <strong>添加专题</strong>
+        <button type="button" class="modal-close" onclick="closeManualTopicModal()" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <label>
+          <span>专题名称</span>
+          <input id="manualTopicName" type="text" autocomplete="off" placeholder="填写要研究的专题名称，建议简短明确" />
+        </label>
+        <label>
+          <span>专属字段</span>
+          <input id="manualTopicFields" type="text" autocomplete="off" placeholder="填写用于筛选页面池的对象、栏目、关键词或证据类型，可用顿号、逗号或空格分隔" />
+        </label>
+        <label>
+          <span>可抽取单元</span>
+          <input id="manualTopicUnits" type="text" autocomplete="off" placeholder="填写希望叙事单元表抽取的字段名，可用顿号、逗号或空格分隔" />
+        </label>
+        <label>
+          <span>可能回答的问题</span>
+          <textarea id="manualTopicQuestions" rows="3" placeholder="填写这个专题希望支持回答的研究问题，可写一条或多条"></textarea>
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-cancel-btn" onclick="closeManualTopicModal()">取消</button>
+        <button type="button" class="modal-confirm-btn" id="manualTopicConfirmBtn">添加</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="modelModal" style="display:none">
+    <div class="modal-card model-modal">
+      <div class="modal-header">
+        <strong id="modalTitle">配置模型</strong>
+        <button type="button" class="modal-close" onclick="closeModelModal()" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <label>
+          <span>模型厂商</span>
+          <select id="modalProvider"></select>
+        </label>
+        <label>
+          <span>API Key</span>
+          <div class="api-key-row">
+            <input id="modalApiKey" type="password" autocomplete="off" placeholder="输入 API Key" />
+            <button type="button" id="modalApiKeyToggle" class="eye-btn" title="显示/隐藏 API Key">显示</button>
+          </div>
+        </label>
+        <label>
+          <span id="modalModelLabel">模型</span>
+          <div class="model-row">
+            <input id="modalModelInput" list="modalModelOptions" autocomplete="off" placeholder="可手动输入或从查询结果选择模型" />
+            <datalist id="modalModelOptions"></datalist>
+            <button id="modalQueryModelsBtn" type="button">查询模型</button>
+          </div>
+        </label>
+        <label id="modalOcrLanguageHintRow" class="ocr-language-row" style="display:none">
+          <span>页面文字提示</span>
+          <input id="modalOcrLanguageHint" type="text" autocomplete="off" placeholder="可选，如：繁体、满汉合璧、藏文夹注" />
+        </label>
+        <div class="prompt-config">
+          <div class="prompt-head">
+            <div>
+              <span>当前提示词</span>
+              <em id="modalPromptStatus">系统默认</em>
+            </div>
+            <div class="prompt-actions">
+              <button id="modalTogglePromptBtn" type="button">收起</button>
+              <button id="modalNewPromptBtn" type="button" title="新建提示词">+</button>
+            </div>
+          </div>
+          <div id="modalPromptPanel" class="prompt-panel">
+            <textarea id="modalPromptInput" class="prompt-textarea" readonly placeholder="点击 + 新建提示词，或从提示词列表选择。"></textarea>
+            <div class="prompt-history-row">
+              <select id="modalPromptHistory"></select>
+              <button id="modalApplyPromptBtn" type="button">选择</button>
+              <button id="modalDeletePromptBtn" type="button">删除</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-cancel-btn" onclick="closeModelModal()">取消</button>
+        <button type="button" class="modal-confirm-btn" id="modalConfirmBtn" onclick="confirmModelConfig()">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=20260607-manual-topic-explain"></script>
+</body>
+</html>

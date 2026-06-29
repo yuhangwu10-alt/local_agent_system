@@ -1,0 +1,10 @@
+INFO:     127.0.0.1:57641 - "GET /openapi.json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57642 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57649 - "GET /openapi.json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57650 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63319 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63319 - "GET /api/app-info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63319 - "GET /api/ocr/providers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63319 - "GET /api/ocr/default-prompts HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63319 - "GET /api/projects/2596bc3b-2ccb-4150-a87d-1ce46f33ad1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63319 - "GET /api/documents/projects/2596bc3b-2ccb-4150-a87d-1ce46f33ad1d HTTP/1.1" 200 OK
