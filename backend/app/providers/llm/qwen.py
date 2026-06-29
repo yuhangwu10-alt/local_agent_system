@@ -19,7 +19,7 @@ class OpenAICompatibleLLM(LLMProvider):
         )
         self.model = settings.llm_model
         self.provider = settings.llm_provider
-        self.max_retries = 0
+        self.max_retries = 2
 
     async def chat(self, messages: list[dict], stream: bool = False):
         if stream:
@@ -87,7 +87,7 @@ class RuntimeLLMProvider(LLMProvider):
         )
         self.provider = provider
         self.model = model
-        self.max_retries = 0
+        self.max_retries = 2
 
     async def chat(self, messages: list[dict], stream: bool = False):
         if stream:
