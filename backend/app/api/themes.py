@@ -1,9 +1,11 @@
 import uuid
 import json
 import re
+import tempfile
+from pathlib import Path
 
-from fastapi import APIRouter, Body, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,8 +14,10 @@ from app.models.theme import ThemeConfig
 from app.models.project import Project
 from app.schemas.theme import ThemeConfigCreate, ThemeConfigResponse, ThemeConfigUpdate
 from app.services import llm_service
+from app.services.excel_service import export_to_excel, read_topic_excel
 from app.services.keyword_completion_service import run_keyword_completion
 from app.services.task_manager import task_manager
+from app.utils.file_storage import sanitize_filename
 
 router = APIRouter(prefix="/api", tags=["themes"])
 
@@ -285,3 +289,106 @@ async def export_theme_config(theme_id: uuid.UUID, db: AsyncSession = Depends(ge
         media_type="application/json",
         headers={"Content-Disposition": f'attachment; filename="theme_config_{safe_name}.json"'},
     )
+
+
+@router.post("/themes/export-list")
+async def export_topic_list(payload: dict = Body(default_factory=dict)):
+    """将前端专题列表导出为 Excel 文件"""
+    raw_topics = payload.get("专题列表") or payload.get("topics") or []
+    if not isinstance(raw_topics, list) or not raw_topics:
+        raise HTTPException(status_code=400, detail="请提供要导出的专题列表")
+
+    # 规范化为 4 列（与手动输入表单对齐）
+    rows = []
+    for topic in raw_topics:
+        if not isinstance(topic, dict):
+            continue
+        name = topic.get("专题名称") or topic.get("name") or ""
+        if not name:
+            continue
+        rows.append({
+            "专题名称": name,
+            "专属字段": _join_list(_extract_custom_field(topic, "页面池对象")),
+            "可抽取单元": _join_list(_extract_custom_field(topic, "可抽取单元")),
+            "可能回答的问题": _join_list(_extract_custom_field(topic, "可能回答的问题")),
+        })
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="专题列表中没有可导出的数据")
+
+    import io as _io
+    import pandas as pd
+    from urllib.parse import quote
+
+    buffer = _io.BytesIO()
+    df = pd.DataFrame(rows)
+    df.to_excel(buffer, index=False, sheet_name="专题列表")
+    buffer.seek(0)
+
+    encoded_filename = quote("专题列表.xlsx")
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+        },
+    )
+
+
+@router.post("/themes/import-list")
+async def import_topic_list(file: UploadFile = File(...)):
+    """从上传的 Excel 文件导入专题列表"""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="请上传 Excel 文件")
+
+    ext = Path(file.filename).suffix.lower()
+    if ext not in (".xlsx", ".xls"):
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx 或 .xls 格式的 Excel 文件")
+
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(await file.read())
+        tmp_path = Path(tmp.name)
+
+    try:
+        topics = await read_topic_excel(tmp_path)
+        return {"专题列表": topics, "数量": len(topics)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        import asyncio as _asyncio
+        _asyncio.create_task(_cleanup_file(tmp_path))
+
+
+# ---- 导出/导入辅助函数 ----
+
+async def _cleanup_file(path: Path):
+    """异步清理临时文件"""
+    import asyncio as _asyncio
+    await _asyncio.sleep(5)  # 给 FileResponse 一点时间读取
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _join_list(items) -> str:
+    """将列表用顿号连接为一个字符串"""
+    if not items:
+        return ""
+    if isinstance(items, str):
+        return items
+    return "、".join(str(x) for x in items if str(x).strip())
+
+
+def _extract_custom_field(topic: dict, field_name: str) -> list:
+    """从前端 topic 对象中提取自定义字段"""
+    cf = topic.get("_customFields") or topic.get("custom_fields")
+    if isinstance(cf, dict):
+        val = cf.get(field_name)
+        if val is not None:
+            return val if isinstance(val, list) else [val]
+    # 也尝试顶层取（AI 提取格式）
+    val = topic.get(field_name)
+    if val is not None:
+        return val if isinstance(val, list) else [val]
+    return []

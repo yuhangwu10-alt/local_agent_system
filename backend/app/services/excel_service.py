@@ -40,6 +40,85 @@ async def read_ocr_excel(file_path: Path) -> list[dict]:
     return await asyncio.to_thread(_read)
 
 
+import re
+
+
+async def read_topic_excel(file_path: Path) -> list[dict]:
+    """读取专题列表 Excel，返回 AI 提取格式的专题列表。
+
+    支持 4 列（对应手动输入表单）：
+    - 专题名称（必填）
+    - 专属字段 → 映射为 页面池对象
+    - 可抽取单元
+    - 可能回答的问题
+
+    也兼容旧格式中的「页面池对象」列名。
+    """
+
+    def _read():
+        df = pd.read_excel(file_path)
+        original_columns = list(df.columns)
+        col_map = {str(col).strip(): col for col in df.columns}
+
+        # 专题名称列（必填）
+        name_aliases = ["专题名称", "主题名称", "名称", "专题"]
+        name_col = next((col_map[a] for a in name_aliases if a in col_map), None)
+        if name_col is None:
+            raise ValueError(
+                "Excel 缺少必填列「专题名称」。"
+                f"当前列: {original_columns}"
+            )
+
+        # 专属字段 → 页面池对象；也兼容直接写「页面池对象」
+        fields_aliases = ["专属字段", "页面池对象", "页面池", "对象"]
+        fields_col = next((col_map[a] for a in fields_aliases if a in col_map), None)
+
+        # 可抽取单元
+        units_aliases = ["可抽取单元", "抽取单元", "叙事单元字段", "单元"]
+        units_col = next((col_map[a] for a in units_aliases if a in col_map), None)
+
+        # 可能回答的问题
+        questions_aliases = ["可能回答的问题", "研究问题", "问题"]
+        questions_col = next((col_map[a] for a in questions_aliases if a in col_map), None)
+
+        def _split(value) -> list[str]:
+            if pd.isna(value):
+                return []
+            text = str(value).strip()
+            if not text:
+                return []
+            return [item.strip() for item in re.split(r"[、，,；;\n\r]+", text) if item.strip()]
+
+        topics = []
+        for _, row in df.iterrows():
+            name = str(row[name_col]).strip()
+            if pd.isna(row[name_col]) or not name:
+                continue
+
+            fields = _split(row[fields_col]) if fields_col else []
+            units = _split(row[units_col]) if units_col else []
+            questions = _split(row[questions_col]) if questions_col else []
+
+            topic = {
+                "专题名称": name,
+                "专题描述": "",
+                "核心词": [],
+                "扩展词": [],
+                "页面池对象": fields,
+                "可抽取单元": units,
+                "可能回答的问题": questions,
+                "证据页码": [],
+                "佐证摘录": [],
+            }
+            topics.append(topic)
+
+        if not topics:
+            raise ValueError("Excel 中没有可导入的专题数据（所有行的专题名称为空）")
+        return topics
+
+    return await asyncio.to_thread(_read)
+
+
 def export_to_excel(data: list[dict], output_path: Path, sheet_name: str = "Sheet1"):
     """导出数据到 Excel"""
     df = pd.DataFrame(data)

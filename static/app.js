@@ -85,6 +85,17 @@ const els = {
   modalQueryModelsBtn: document.getElementById("modalQueryModelsBtn"),
   modalConfirmBtn: document.getElementById("modalConfirmBtn"),
   topicList: document.getElementById("topicList"),
+  importTopicsModal: document.getElementById("importTopicsModal"),
+  importTopicsFile: document.getElementById("importTopicsFile"),
+  importFileName: document.getElementById("importFileName"),
+  importTopicsError: document.getElementById("importTopicsError"),
+  importTopicsConfirmBtn: document.getElementById("importTopicsConfirmBtn"),
+  browseTopicsModal: document.getElementById("browseTopicsModal"),
+  browseTopicsTitle: document.getElementById("browseTopicsTitle"),
+  browseTopicsBody: document.getElementById("browseTopicsBody"),
+  browseTopicsSearch: document.getElementById("browseTopicsSearch"),
+  browseTopicsGrid: document.getElementById("browseTopicsGrid"),
+  browseTopicsInfo: document.getElementById("browseTopicsInfo"),
 };
 
 init();
@@ -188,6 +199,82 @@ function loadDocState(documentId) {
   renderTopics();
   renderOutputs();
   setStep(state.currentStep);
+
+  // 异步：从后端恢复专题列表（localStorage 为空或被清除时自动补齐）
+  syncTopicsFromBackend(documentId);
+}
+
+async function syncTopicsFromBackend(documentId) {
+  if (!documentId) return;
+  const serverTopics = await _fetchTopicsFromBackend(documentId);
+  if (!serverTopics || !serverTopics.length) return;
+
+  const localTopics = state.topics.filter((t) => !t._deleted);
+  if (localTopics.length === 0) {
+    // localStorage 为空，直接用后端数据
+    state.topics = serverTopics;
+  } else if (serverTopics.length > localTopics.length) {
+    // 后端更全，合并（后端的 source:恢复 专题补充到本地）
+    const localNames = new Set(localTopics.map((t) => t.name));
+    const extraTopics = serverTopics.filter((t) => !localNames.has(t.name));
+    if (extraTopics.length) {
+      state.topics = [...localTopics, ...extraTopics];
+    }
+  } else {
+    // 本地更全，回写到后端
+    scheduleSaveTopics();
+    return;
+  }
+  renderTopics();
+  persistState();
+}
+
+async function _fetchTopicsFromBackend(documentId) {
+  try {
+    const response = await fetch(`/api/documents/${documentId}/topics`);
+    if (!response.ok) return null;
+    const data = await response.json();
+    return (data.topics || []).map((t) => ({
+      ...t,
+      source: t.source || "恢复",
+      selected: t.selected !== undefined ? t.selected : true,
+      theme: null,
+    }));
+  } catch (_) {
+    return null;
+  }
+}
+
+let _saveTopicsTimer = null;
+function scheduleSaveTopics() {
+  if (_saveTopicsTimer) clearTimeout(_saveTopicsTimer);
+  _saveTopicsTimer = setTimeout(() => saveTopicsToBackend(), 500);
+}
+
+async function saveTopicsToBackend() {
+  const documentId = state.activeDocumentId;
+  if (!documentId) return;
+  const doc = getActiveDocument();
+  if (!doc || (doc.status !== "ocr_completed" && doc.status !== "ocr_processing")) return;
+  try {
+    const topics = state.topics.filter((t) => !t._deleted).map((t) => ({
+      专题名称: t.name,
+      _description: t._description || "",
+      _keywords: t._keywords || {},
+      _customFields: t._customFields || {},
+      _evidencePages: t._evidencePages || [],
+      _evidence: t._evidence || [],
+      source: t.source || "手动",
+      selected: Boolean(t.selected),
+    }));
+    await fetch(`/api/documents/${documentId}/topics`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ 专题列表: topics }),
+    });
+  } catch (_) {
+    // 静默失败，不影响用户操作
+  }
 }
 
 function sanitizePersistedTopics(topics) {
@@ -242,7 +329,35 @@ function bindEvents() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && els.modelModal?.style.display !== "none") closeModelModal();
     if (e.key === "Escape" && els.manualTopicModal?.style.display !== "none") closeManualTopicModal();
+    if (e.key === "Escape" && els.importTopicsModal?.style.display !== "none") closeImportTopicsModal();
+    if (e.key === "Escape" && els.browseTopicsModal?.style.display !== "none") closeBrowseTopicsModal();
   });
+
+  // 浏览弹窗：遮罩关闭
+  els.browseTopicsModal?.addEventListener("mousedown", (e) => {
+    if (e.target === els.browseTopicsModal) closeBrowseTopicsModal();
+  });
+
+  // 浏览弹窗：关键词搜索（实时筛选）
+  els.browseTopicsSearch?.addEventListener("input", () => {
+    renderBrowseTopicsGrid();
+  });
+
+  // 导入弹窗：遮罩关闭
+  els.importTopicsModal?.addEventListener("mousedown", (e) => {
+    if (e.target === els.importTopicsModal) closeImportTopicsModal();
+  });
+
+  // 导入弹窗：文件选择
+  els.importTopicsFile?.addEventListener("change", () => {
+    const file = els.importTopicsFile?.files?.[0];
+    if (els.importFileName) els.importFileName.textContent = file ? file.name : "未选择文件";
+    if (els.importTopicsConfirmBtn) els.importTopicsConfirmBtn.disabled = !file;
+    if (els.importTopicsError) { els.importTopicsError.style.display = "none"; els.importTopicsError.textContent = ""; }
+  });
+
+  // 导入弹窗：确认按钮
+  els.importTopicsConfirmBtn?.addEventListener("click", handleImportTopics);
 
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -1765,6 +1880,7 @@ async function handleExtractionComplete(task) {
   addMessage("agent", summary);
   setStep("topic", `发现 ${topics.length} 个专题，请确认`);
   addNotice(`已提取 ${topics.length} 个专题`);
+  scheduleSaveTopics();
 }
 
 function formatTopicExtractionSummary(result, topics, batchInfo) {
@@ -1839,6 +1955,7 @@ function addTopicsFromJson(topics, { source = "AI", replaceSource = "AI" } = {})
   }
   renderTopics();
   persistState();
+  scheduleSaveTopics();
   for (const name of needsKeywordCompletion) completeKeywordsForTopic(name);
   return added;
 }
@@ -1969,6 +2086,9 @@ function renderTopics() {
       <button type="button" onclick="setAllTopics(true)">全选</button>
       <button type="button" onclick="setAllTopics(false)">全不选</button>
       <button type="button" onclick="toggleTopicPanel()">${state.topicCollapsed ? "展开" : "收起"}</button>
+      <button type="button" onclick="openBrowseTopicsModal()" title="弹窗浏览全部专题">📋 浏览</button>
+      <button type="button" onclick="exportTopicList()" title="将当前专题列表导出为 Excel">📤 导出</button>
+      <button type="button" onclick="openImportTopicsModal()" title="从 Excel 导入专题列表">📥 导入</button>
       <span>${selectedCount}/${state.topics.length} 已选</span>
     </div>
   `;
@@ -2022,6 +2142,7 @@ function setAllTopics(checked) {
   });
   renderTopics();
   persistState();
+  scheduleSaveTopics();
 }
 
 function toggleTopicPanel() {
@@ -2034,6 +2155,7 @@ function toggleTopic(index, checked) {
   if (state.topics[index]) state.topics[index].selected = checked;
   renderTopics();
   persistState();
+  scheduleSaveTopics();
 }
 
 async function deleteTopic(index) {
@@ -2049,6 +2171,7 @@ async function deleteTopic(index) {
   state.topics.splice(index, 1);
   renderTopics();
   persistState();
+  scheduleSaveTopics();
 
   if (!topic.theme?.id) {
     addNotice(`已删除专题：${topic.name}`);
@@ -2063,6 +2186,211 @@ async function deleteTopic(index) {
   } catch (error) {
     addMessage("agent", `专题已从当前列表移除，但后端删除失败：${error.message}`);
   }
+}
+
+// ============================================================
+// 专题列表导入/导出
+// ============================================================
+
+function openImportTopicsModal() {
+  if (els.importTopicsFile) els.importTopicsFile.value = "";
+  if (els.importFileName) els.importFileName.textContent = "未选择文件";
+  if (els.importTopicsError) { els.importTopicsError.style.display = "none"; els.importTopicsError.textContent = ""; }
+  if (els.importTopicsConfirmBtn) els.importTopicsConfirmBtn.disabled = true;
+  if (els.importTopicsModal) els.importTopicsModal.style.display = "flex";
+}
+
+function closeImportTopicsModal() {
+  if (els.importTopicsModal) els.importTopicsModal.style.display = "none";
+}
+
+async function exportTopicList() {
+  if (!state.topics.length) {
+    addNotice("当前没有专题可导出，请先通过 AI 分析或手动添加专题。");
+    return;
+  }
+  const topics = state.topics.map((topic) => ({
+    专题名称: topic.name,
+    _description: topic._description || "",
+    _keywords: topic._keywords || {},
+    _customFields: topic._customFields || {},
+    _evidencePages: topic._evidencePages || [],
+    _evidence: topic._evidence || [],
+  }));
+
+  try {
+    const response = await fetch("/api/themes/export-list", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ 专题列表: topics }),
+    });
+    if (!response.ok) {
+      const err = await readError(response);
+      throw new Error(err);
+    }
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "专题列表.xlsx";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+    addNotice(`已导出 ${topics.length} 个专题到 Excel。`);
+  } catch (error) {
+    addNotice(`导出失败：${error.message}`);
+  }
+}
+
+async function handleImportTopics() {
+  const fileInput = els.importTopicsFile;
+  const file = fileInput?.files?.[0];
+  if (!file) {
+    showImportError("请先选择一个 Excel 文件");
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  try {
+    const response = await fetch("/api/themes/import-list", {
+      method: "POST",
+      body: formData,
+    });
+    if (!response.ok) {
+      const err = await readError(response);
+      throw new Error(err);
+    }
+    const result = await response.json();
+    const topics = result["专题列表"] || [];
+    if (!topics.length) {
+      showImportError("Excel 中没有可导入的专题数据");
+      return;
+    }
+    addTopicsFromJson(topics, { source: "导入", replaceSource: "导入" });
+    closeImportTopicsModal();
+    scheduleSaveTopics();
+    setStep("topic", "专题列表已更新，请勾选要处理的专题");
+    addMessage("agent", `已从 Excel 导入 ${topics.length} 个专题。请在专题列表中勾选要处理的专题。`);
+  } catch (error) {
+    showImportError(`导入失败：${error.message}`);
+  }
+}
+
+function showImportError(msg) {
+  if (els.importTopicsError) {
+    els.importTopicsError.textContent = msg;
+    els.importTopicsError.style.display = "block";
+  }
+}
+
+// ============================================================
+// 专题浏览弹窗
+// ============================================================
+
+function openBrowseTopicsModal() {
+  if (els.browseTopicsSearch) els.browseTopicsSearch.value = "";
+  if (els.browseTopicsModal) els.browseTopicsModal.style.display = "flex";
+  if (els.browseTopicsTitle) els.browseTopicsTitle.textContent = `专题列表（${state.topics.length} 条）`;
+  renderBrowseTopicsGrid();
+}
+
+function closeBrowseTopicsModal() {
+  if (els.browseTopicsModal) els.browseTopicsModal.style.display = "none";
+}
+
+function getBrowseSearchKeyword() {
+  return (els.browseTopicsSearch?.value || "").trim().toLowerCase();
+}
+
+function renderBrowseTopicsGrid() {
+  if (!els.browseTopicsGrid) return;
+
+  const keyword = getBrowseSearchKeyword();
+  const allTopics = state.topics.map((t, i) => ({ ...t, _index: i }));
+
+  // 按关键词筛选
+  let filtered = allTopics;
+  if (keyword) {
+    filtered = allTopics.filter((t) => {
+      const fields = normalizeCustomFields(t);
+      const searchText = [
+        t.name,
+        t._description || "",
+        t.source || "",
+        ...(fields["页面池对象"] || []),
+        ...(fields["可抽取单元"] || []),
+        ...(fields["可能回答的问题"] || []),
+      ].join(" ").toLowerCase();
+      return searchText.includes(keyword);
+    });
+  }
+
+  const totalSelected = state.topics.filter((t) => t.selected).length;
+  if (els.browseTopicsInfo) {
+    if (keyword) {
+      els.browseTopicsInfo.textContent = `筛选 ${filtered.length}/${state.topics.length} 条 · ${totalSelected} 已选`;
+    } else {
+      els.browseTopicsInfo.textContent = `${totalSelected}/${state.topics.length} 已选`;
+    }
+  }
+
+  if (!filtered.length) {
+    els.browseTopicsGrid.innerHTML = `<div class="note">${keyword ? "没有匹配的专题" : "暂无专题"}</div>`;
+    return;
+  }
+
+  els.browseTopicsGrid.innerHTML = `<div class="browse-topics-grid">${filtered.map((topic) => {
+    const index = topic._index;
+    const fields = normalizeCustomFields(topic);
+    const detailParts = [];
+    if (topic._description) detailParts.push(topic._description);
+    const pageObjects = formatCustomFieldValue(fields["页面池对象"]);
+    if (pageObjects !== "暂无") detailParts.push(`对象：${pageObjects}`);
+    const units = formatCustomFieldValue(fields["可抽取单元"]);
+    if (units !== "暂无") detailParts.push(`单元：${units}`);
+
+    return `
+      <div class="browse-topic-card ${topic.selected ? "selected" : ""}" data-topic-index="${index}">
+        <input type="checkbox" ${topic.selected ? "checked" : ""}
+          onchange="toggleTopicFromBrowse(${index}, this.checked)" />
+        <div class="browse-topic-card-main">
+          <div class="browse-topic-card-title">
+            <strong title="${escapeHtml(topic.name)}">${escapeHtml(topic.name)}</strong>
+            <em>${escapeHtml(topic.source)}</em>
+          </div>
+          ${detailParts.length ? `<div class="browse-topic-card-detail" title="${escapeHtml(detailParts.join("；"))}">${escapeHtml(detailParts.join("；"))}</div>` : ""}
+        </div>
+        <button type="button" class="browse-topic-card-delete" onclick="deleteTopicFromBrowse(${index})" title="删除">✕</button>
+      </div>`;
+  }).join("")}</div>`;
+}
+
+function toggleTopicFromBrowse(index, checked) {
+  toggleTopic(index, checked);
+  // 更新卡片样式
+  const card = els.browseTopicsGrid?.querySelector(`[data-topic-index="${index}"]`);
+  if (card) card.classList.toggle("selected", checked);
+  // 更新计数（搜索词可能变化，所以重算）
+  const keyword = getBrowseSearchKeyword();
+  const totalSelected = state.topics.filter((t) => t.selected).length;
+  if (els.browseTopicsInfo) {
+    if (keyword) {
+      const filteredCount = els.browseTopicsGrid?.querySelectorAll(".browse-topic-card").length || 0;
+      els.browseTopicsInfo.textContent = `筛选 ${filteredCount}/${state.topics.length} 条 · ${totalSelected} 已选`;
+    } else {
+      els.browseTopicsInfo.textContent = `${totalSelected}/${state.topics.length} 已选`;
+    }
+  }
+}
+
+async function deleteTopicFromBrowse(index) {
+  await deleteTopic(index);
+  renderBrowseTopicsGrid();
+  renderTopics();
+  if (els.browseTopicsTitle) els.browseTopicsTitle.textContent = `专题列表（${state.topics.length} 条）`;
 }
 
 function looksLikeLocalTopicAdd(text) {

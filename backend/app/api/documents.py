@@ -314,3 +314,36 @@ async def delete_document(document_id: uuid.UUID, db: AsyncSession = Depends(get
             shutil.rmtree(page_images_dir)
     except Exception as e:
         logger.warning(f"清理文档文件失败 {doc_name}: {e}")
+
+
+@router.get("/{document_id}/topics")
+async def get_document_topics(document_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """获取已保存的专题列表"""
+    result = await db.execute(select(SourceDocument).where(SourceDocument.id == document_id))
+    doc = result.scalar_one_or_none()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    topics = doc.saved_topics or {}
+    return {"topics": topics.get("专题列表", []), "updated_at": topics.get("updated_at", "")}
+
+
+@router.put("/{document_id}/topics")
+async def save_document_topics(
+    document_id: uuid.UUID,
+    payload: dict = Body(default_factory=dict),
+    db: AsyncSession = Depends(get_db),
+):
+    """保存专题列表，支持前端在任意时刻持久化当前专题状态"""
+    result = await db.execute(select(SourceDocument).where(SourceDocument.id == document_id))
+    doc = result.scalar_one_or_none()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    topics = payload.get("专题列表") or payload.get("topics") or []
+    from datetime import datetime as _dt
+    doc.saved_topics = {
+        "专题列表": topics,
+        "updated_at": _dt.now().isoformat(),
+    }
+    await db.commit()
+    return {"status": "saved", "count": len(topics)}

@@ -234,6 +234,72 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="importTopicsModal" style="display:none">
+    <div class="modal-card import-topics-modal">
+      <div class="modal-header">
+        <strong>导入专题列表</strong>
+        <button type="button" class="modal-close" onclick="closeImportTopicsModal()" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <details class="import-spec" open>
+          <summary>📋 Excel 列名规范（点击展开/收起）</summary>
+          <div class="import-spec-table-wrap">
+            <table class="import-spec-table horizontal">
+              <thead>
+                <tr>
+                  <th><code>专题名称</code><br/><span class="spec-required">✅ 必填</span></th>
+                  <th><code>专属字段</code><br/><span class="spec-optional">选填</span></th>
+                  <th><code>可抽取单元</code><br/><span class="spec-optional">选填</span></th>
+                  <th><code>可能回答的问题</code><br/><span class="spec-optional">选填</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>专题的简短名称</td>
+                  <td>筛选页面池的对象、栏目或关键词，顿号或逗号分隔，如：水利工程、灌溉系统</td>
+                  <td>叙事单元表的字段名，顿号或逗号分隔，如：时间线索、地点线索</td>
+                  <td>顿号或逗号分隔，如：当地有哪些水利设施？</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <div class="import-file-row">
+          <span class="import-file-label">📎 选择 Excel 文件（.xlsx）</span>
+          <div class="import-file-input-wrap">
+            <input type="file" id="importTopicsFile" accept=".xlsx,.xls" />
+            <span id="importFileName" class="import-file-name">未选择文件</span>
+          </div>
+        </div>
+        <p class="import-hint">💡 提示：可先用导出功能导出一份 Excel，按相同格式填写后导入。</p>
+        <p id="importTopicsError" class="import-error" style="display:none"></p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-cancel-btn" onclick="closeImportTopicsModal()">取消</button>
+        <button type="button" class="modal-confirm-btn" id="importTopicsConfirmBtn">导入</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="browseTopicsModal" style="display:none">
+    <div class="modal-card browse-topics-modal">
+      <div class="modal-header">
+        <strong id="browseTopicsTitle">专题列表</strong>
+        <button type="button" class="modal-close" onclick="closeBrowseTopicsModal()" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body" id="browseTopicsBody">
+        <div class="browse-topics-search">
+          <input type="text" id="browseTopicsSearch" placeholder="输入关键词筛选专题..." autocomplete="off" />
+        </div>
+        <div class="browse-topics-grid-wrap" id="browseTopicsGrid"></div>
+      </div>
+      <div class="modal-footer">
+        <span id="browseTopicsInfo" class="browse-topics-info"></span>
+        <button type="button" class="modal-cancel-btn" onclick="closeBrowseTopicsModal()">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="modelModal" style="display:none">
     <div class="modal-card model-modal">
       <div class="modal-header">
