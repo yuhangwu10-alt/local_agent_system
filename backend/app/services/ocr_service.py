@@ -99,10 +99,18 @@ async def run_ocr_task(task_id: UUID, document_id: str, **kwargs):
         batch_size = _normalize_ocr_batch_size(kwargs.get("ocr_batch_size"))
         runtime_config = _normalize_ocr_runtime_config(kwargs.get("ocr_config"))
 
+        recovered = bool(kwargs.get("recovered"))
+
         if doc_info.file_type == "pdf":
-            failed_ratio = await _ocr_pdf(doc_info, t_id, batch_size=batch_size, runtime_config=runtime_config)
+            failed_ratio = await _ocr_pdf(
+                doc_info,
+                t_id,
+                batch_size=batch_size,
+                runtime_config=runtime_config,
+                recovered=recovered,
+            )
         else:
-            failed_ratio = await _ocr_excel(doc_info, t_id)
+            failed_ratio = await _ocr_excel(doc_info, t_id, recovered=recovered)
 
         # BE-003: 失败页比例过高则判定任务失败
         if failed_ratio > settings.ocr_fail_threshold:
@@ -165,6 +173,7 @@ async def _ocr_pdf(
     *,
     batch_size: int = 1,
     runtime_config: dict | None = None,
+    recovered: bool = False,
 ) -> float:
     """处理 PDF 文档的 OCR（逐页处理，避免内存问题），返回失败页比例"""
     from app.database import async_session
@@ -173,9 +182,10 @@ async def _ocr_pdf(
     pdf_path = safe_join(input_dir, doc.file_path)
     total_pages = await pdf_service.get_pdf_page_count(pdf_path)
 
-    # BE-002: OCR 前清理旧页面（幂等）
+    # 新任务默认清理旧页面；服务重启恢复时保留已落库页面并跳过。
     async with async_session() as db:
-        await db.execute(delete(PageContent).where(PageContent.document_id == doc.id))
+        if not recovered:
+            await db.execute(delete(PageContent).where(PageContent.document_id == doc.id))
         await db.execute(
             update(SourceDocument)
             .where(SourceDocument.id == doc.id)
@@ -187,7 +197,15 @@ async def _ocr_pdf(
     images_dir = ensure_dir(get_page_images_dir(doc.id))
     db_batch: list[PageContent] = []
     db_batch_size = 50
-    failed_count = 0
+
+    async with async_session() as db:
+        existing_result = await db.execute(
+            select(PageContent).where(PageContent.document_id == doc.id)
+        )
+        existing_pages = existing_result.scalars().all()
+        existing_page_nos = {page.page_no for page in existing_pages}
+
+    remaining_page_numbers = [page_no for page_no in range(1, total_pages + 1) if page_no not in existing_page_nos]
 
     async def process_page(page_no: int) -> PageContent:
         try:
@@ -220,16 +238,15 @@ async def _ocr_pdf(
         return page
 
     # 按用户配置的批次窗口处理。批次页数受 API 厂商并发/限流能力影响。
-    completed_pages = 0
+    completed_pages = len(existing_page_nos)
     await task_manager.update_progress(
         task_id,
-        5,
-        {"current": 0, "total": total_pages, "type": "ocr", "document_id": str(doc.id)},
+        int(completed_pages / total_pages * 90) + 5 if total_pages else 5,
+        {"current": completed_pages, "total": total_pages, "type": "ocr", "document_id": str(doc.id)},
     )
-    for start in range(1, total_pages + 1, batch_size):
-        page_numbers = list(range(start, min(start + batch_size, total_pages + 1)))
+    for start in range(0, len(remaining_page_numbers), batch_size):
+        page_numbers = remaining_page_numbers[start:start + batch_size]
         pages = await asyncio.gather(*(process_page(page_no) for page_no in page_numbers))
-        failed_count += sum(1 for page in pages if page.ocr_status == "failed")
 
         db_batch.extend(pages)
 
@@ -239,7 +256,7 @@ async def _ocr_pdf(
                 await db.commit()
             db_batch = []
 
-        completed_pages += len(pages)
+        completed_pages += len(page_numbers)
         progress = int(completed_pages / total_pages * 90) + 5
         await task_manager.update_progress(
             task_id,
@@ -259,8 +276,10 @@ async def _ocr_pdf(
             select(PageContent).where(PageContent.document_id == doc.id)
         )
         all_pages = result.scalars().all()
+        failed_count = 0
         for page in all_pages:
             if page.ocr_status == "failed":
+                failed_count += 1
                 continue
             text = (page.content or "").strip()
             # 空白页判定：内容过短或为 OCR 模型返回的"无文字"标识
@@ -286,7 +305,7 @@ async def _ocr_pdf(
     return failed_count / total_pages if total_pages > 0 else 0.0
 
 
-async def _ocr_excel(doc: DocInfo, task_id: UUID) -> float:
+async def _ocr_excel(doc: DocInfo, task_id: UUID, *, recovered: bool = False) -> float:
     """处理 Excel 文档，返回失败比例"""
     from app.database import async_session
 
@@ -294,9 +313,10 @@ async def _ocr_excel(doc: DocInfo, task_id: UUID) -> float:
     excel_path = safe_join(input_dir, doc.file_path)
     pages = await excel_service.read_ocr_excel(excel_path)
 
-    # BE-002: 清理旧页面（幂等）
+    # 新任务默认清理旧页面；服务重启恢复时保留已落库页面并跳过。
     async with async_session() as db:
-        await db.execute(delete(PageContent).where(PageContent.document_id == doc.id))
+        if not recovered:
+            await db.execute(delete(PageContent).where(PageContent.document_id == doc.id))
         await db.execute(
             update(SourceDocument)
             .where(SourceDocument.id == doc.id)
@@ -306,8 +326,21 @@ async def _ocr_excel(doc: DocInfo, task_id: UUID) -> float:
 
     batch: list[PageContent] = []
     batch_size = 50
+    async with async_session() as db:
+        existing_result = await db.execute(
+            select(PageContent.page_no).where(PageContent.document_id == doc.id)
+        )
+        existing_page_nos = set(existing_result.scalars().all())
 
     for idx, page_data in enumerate(pages):
+        if page_data["page_no"] in existing_page_nos:
+            progress = int((idx + 1) / len(pages) * 90) + 5
+            await task_manager.update_progress(
+                task_id,
+                progress,
+                {"current": idx + 1, "total": len(pages), "type": "ocr", "document_id": str(doc.id)},
+            )
+            continue
         page = PageContent(
             document_id=doc.id,
             page_no=page_data["page_no"],

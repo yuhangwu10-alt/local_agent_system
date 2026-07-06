@@ -20,7 +20,7 @@ echo  Multilingual Ancient Books Page Pool System
 echo ============================================
 echo.
 echo Starting Docker Compose full-stack mode...
-echo Open http://127.0.0.1:8000/ after startup is complete.
+echo Open http://127.0.0.1:8001/ after startup is complete.
 echo.
 docker compose up --build
 if errorlevel 1 (

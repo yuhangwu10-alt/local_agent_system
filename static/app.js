@@ -167,6 +167,9 @@ function saveActiveDocState() {
     step: state.currentStep,
     topicCollapsed: state.topicCollapsed,
     ocrTaskId: state.docStates[state.activeDocumentId]?.ocrTaskId || null,
+    activeExtractionTaskId: state.activeExtractionTaskId || state.docStates[state.activeDocumentId]?.activeExtractionTaskId || null,
+    activeProcessingTaskId: state.activeProcessingTaskId || state.docStates[state.activeDocumentId]?.activeProcessingTaskId || null,
+    processingRunning: Boolean(state.processingRunning),
   };
 }
 
@@ -195,6 +198,9 @@ function loadDocState(documentId) {
   const stepMap = { confirm: "topic", base: "pool", classify: "pool" };
   state.currentStep = stepMap[docState.step] || docState.step || "upload";
   state.topicCollapsed = Boolean(docState.topicCollapsed);
+  state.activeExtractionTaskId = docState.activeExtractionTaskId || null;
+  state.activeProcessingTaskId = docState.activeProcessingTaskId || null;
+  state.processingRunning = Boolean(docState.processingRunning && state.activeProcessingTaskId);
   syncBaseTableOutput();
   renderTopics();
   renderOutputs();
@@ -996,6 +1002,7 @@ async function refreshDocuments() {
   renderDocuments();
   persistState();
   resumeOcrPolling();
+  resumeActiveProjectTasks();
 }
 
 async function uploadFile(file) {
@@ -1728,6 +1735,7 @@ function setExtractionRunning(running, taskId = null) {
     els.cancelExtractTopicsBtn.style.display = running ? "" : "none";
     els.cancelExtractTopicsBtn.disabled = !running;
   }
+  persistState();
 }
 
 function setProcessingRunning(running, taskId = state.activeProcessingTaskId) {
@@ -1742,6 +1750,7 @@ function setProcessingRunning(running, taskId = state.activeProcessingTaskId) {
     runBtn.disabled = running;
     runBtn.textContent = running ? "处理中..." : "处理选中专题";
   }
+  persistState();
 }
 
 function ensureProcessingNotCancelled() {
@@ -2344,13 +2353,7 @@ function renderBrowseTopicsGrid() {
 
   els.browseTopicsGrid.innerHTML = `<div class="browse-topics-grid">${filtered.map((topic) => {
     const index = topic._index;
-    const fields = normalizeCustomFields(topic);
-    const detailParts = [];
-    if (topic._description) detailParts.push(topic._description);
-    const pageObjects = formatCustomFieldValue(fields["页面池对象"]);
-    if (pageObjects !== "暂无") detailParts.push(`对象：${pageObjects}`);
-    const units = formatCustomFieldValue(fields["可抽取单元"]);
-    if (units !== "暂无") detailParts.push(`单元：${units}`);
+    const details = browseTopicDetails(topic);
 
     return `
       <div class="browse-topic-card ${topic.selected ? "selected" : ""}" data-topic-index="${index}">
@@ -2361,11 +2364,52 @@ function renderBrowseTopicsGrid() {
             <strong title="${escapeHtml(topic.name)}">${escapeHtml(topic.name)}</strong>
             <em>${escapeHtml(topic.source)}</em>
           </div>
-          ${detailParts.length ? `<div class="browse-topic-card-detail" title="${escapeHtml(detailParts.join("；"))}">${escapeHtml(detailParts.join("；"))}</div>` : ""}
+          ${details.description ? `<p class="browse-topic-card-desc">${escapeHtml(details.description)}</p>` : ""}
+          <div class="browse-topic-card-fields">
+            ${details.rows.map((row) => `
+              <div class="browse-topic-field">
+                <span>${escapeHtml(row.label)}</span>
+                <p>${escapeHtml(row.value)}</p>
+              </div>
+            `).join("")}
+          </div>
+          ${details.evidence.length ? `
+            <div class="browse-topic-evidence">
+              ${details.evidence.map((item) => `
+                <span>${escapeHtml(item)}</span>
+              `).join("")}
+            </div>
+          ` : ""}
         </div>
         <button type="button" class="browse-topic-card-delete" onclick="deleteTopicFromBrowse(${index})" title="删除">✕</button>
       </div>`;
   }).join("")}</div>`;
+}
+
+function browseTopicDetails(topic) {
+  const fields = normalizeCustomFields(topic);
+  const keywords = topic._keywords || {};
+  const rows = [
+    { label: "核心词", value: formatCustomFieldValue(keywords["核心词"]) },
+    { label: "扩展词", value: formatCustomFieldValue(keywords["扩展词"]) },
+    { label: "页面池对象", value: formatCustomFieldValue(fields["页面池对象"]) },
+    { label: "可抽取单元", value: formatCustomFieldValue(fields["可抽取单元"]) },
+    { label: "可能回答的问题", value: formatCustomFieldValue(fields["可能回答的问题"]) },
+  ].filter((row) => row.value && row.value !== "暂无");
+
+  const evidencePages = normalizeEvidencePages(topic);
+  const evidence = [];
+  if (evidencePages.length) evidence.push(`证据页码：${evidencePages.join("、")}`);
+  for (const item of normalizeEvidenceItems(topic).slice(0, 2)) {
+    const page = item["页码"] ? `第${item["页码"]}页：` : "";
+    evidence.push(`${page}${item["原文"]}`);
+  }
+
+  return {
+    description: String(topic._description || "").trim(),
+    rows,
+    evidence,
+  };
 }
 
 function toggleTopicFromBrowse(index, checked) {
@@ -2502,6 +2546,113 @@ function resumeOcrPolling() {
       addMessage("agent", `「${doc.file_name}」OCR/页面导入已完成，并已生成底表。`);
       persistState();
     });
+  }
+}
+
+async function resumeActiveProjectTasks() {
+  if (!state.project?.id) return;
+  let tasks = [];
+  try {
+    tasks = await api(`/api/tasks/projects/${state.project.id}/active`);
+  } catch (_) {
+    return;
+  }
+
+  for (const task of tasks) {
+    const taskId = String(task.id);
+    if (state.polling.has(taskId)) continue;
+    const payload = task.payload || {};
+    const result = task.result || {};
+    const documentId = payload.document_id || result.document_id;
+
+    if (task.task_type === "ocr" && documentId) {
+      setDocOcrTaskId(documentId, taskId);
+      pollTask(taskId, async () => {
+        clearDocOcrTaskId(documentId);
+        await refreshDocuments();
+        addDocumentBaseTableOutput(documentId);
+        await autoSaveOutput(`${documentId}-base-table`);
+        setStep("topic", "当前文件底表已生成，可以让 AI 分析专题");
+        hideProgress();
+        const doc = state.documents.find((item) => item.id === documentId);
+        addMessage("agent", `已恢复并完成「${doc?.file_name || "文件"}」的 OCR/页面导入任务。`);
+        persistState();
+      });
+      addNotice("已接回正在运行的 OCR/页面导入任务。");
+      continue;
+    }
+
+    if (task.task_type === "topic_extraction") {
+      if (!documentId || documentId === state.activeDocumentId) {
+        setExtractionRunning(true, taskId);
+        pollExtractionTask(taskId);
+        addNotice("已接回正在运行的 AI 批量专题提取任务。");
+      }
+      continue;
+    }
+
+    if (["page_pool", "page_pool_batch", "narrative"].includes(task.task_type)) {
+      setProcessingRunning(true, taskId);
+      resumeProcessingTask(task);
+    }
+  }
+}
+
+async function resumeProcessingTask(task) {
+  const taskId = String(task.id);
+  if (state.polling.has(taskId)) return;
+  addNotice("已接回正在运行的专题处理任务，完成当前步骤后会继续处理剩余专题。");
+  try {
+    const completedTask = await waitTask(taskId);
+    if (completedTask.task_type === "narrative") {
+      const themeId = completedTask.payload?.theme_id;
+      const topic = state.topics.find((item) => item.theme?.id === themeId);
+      if (topic?.theme) {
+        addTopicOutputs(topic.theme);
+        await autoSaveOutput(`${topic.theme.id}-zip`);
+      }
+    }
+    await continueSelectedTopicProcessing();
+  } catch (error) {
+    setProcessingRunning(false);
+    hideProgress();
+    addMessage("agent", `恢复专题处理失败：${friendlyAIError(error.message)}`);
+  }
+}
+
+async function continueSelectedTopicProcessing() {
+  if (state.processingCancelled) return;
+  const activeDoc = getActiveDocument();
+  if (!activeDoc || activeDoc.status !== "ocr_completed") {
+    setProcessingRunning(false);
+    return;
+  }
+  const remaining = state.topics.filter((topic) =>
+    topic.selected &&
+    topic.theme?.id &&
+    !state.outputs.some((output) => output.key === `${topic.theme.id}-zip`)
+  );
+  if (!remaining.length) {
+    setProcessingRunning(false);
+    hideProgress();
+    addNotice("专题处理任务已恢复完成，没有剩余专题需要继续处理。");
+    return;
+  }
+
+  try {
+    setProcessingRunning(true);
+    for (const topic of remaining) {
+      ensureProcessingNotCancelled();
+      state.currentTopic = topic.name;
+      await processTopicNarrative(topic);
+    }
+    addMessage("agent", `已恢复并完成 ${remaining.length} 个剩余专题处理，结果 ZIP 已保存到输出列表。`);
+  } catch (error) {
+    const cancelled = state.processingCancelled || /取消|cancel/i.test(error.message);
+    addMessage("agent", cancelled ? "已停止恢复处理选中专题。" : `恢复处理选中专题失败：${friendlyAIError(error.message)}`);
+  } finally {
+    state.currentTopic = null;
+    setProcessingRunning(false);
   }
 }
 

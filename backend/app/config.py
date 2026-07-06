@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     score_core_threshold: float = 70
     score_borderline_threshold: float = 40
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+    model_config = {"env_file": (".env", "../.env"), "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 settings = Settings()
