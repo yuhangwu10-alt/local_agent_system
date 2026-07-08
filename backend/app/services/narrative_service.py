@@ -224,7 +224,8 @@ async def run_narrative_extraction(task_id, theme_id, **kwargs):
     # 锁 + 读 gen + 写数据 + 翻转旧记录 — 全部在同一个 Session/事务内
     async with async_session() as db:
         lock_key = int(th_id.int % (2**31))
-        await db.execute(sa.text(f"SELECT pg_advisory_xact_lock({lock_key})"))
+        from app.utils.db_lock import acquire_advisory_lock_with_retry
+        await acquire_advisory_lock_with_retry(db, lock_key)
 
         gen_result = await db.execute(
             select(func.max(NarrativeUnit.generation)).where(NarrativeUnit.theme_id == th_id)

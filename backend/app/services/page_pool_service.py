@@ -238,7 +238,8 @@ async def _write_page_pool_entries(
                 continue
 
             lock_key = int(theme_id.int % (2**31))
-            await db.execute(sa.text(f"SELECT pg_advisory_xact_lock({lock_key})"))
+            from app.utils.db_lock import acquire_advisory_lock_with_retry
+            await acquire_advisory_lock_with_retry(db, lock_key)
             gen_result = await db.execute(
                 select(func.max(PagePool.generation)).where(PagePool.theme_id == theme_id)
             )

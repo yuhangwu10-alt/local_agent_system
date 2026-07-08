@@ -204,6 +204,7 @@ function loadDocState(documentId) {
   syncBaseTableOutput();
   renderTopics();
   renderOutputs();
+  updateRunTopicButton();
   setStep(state.currentStep);
 
   // 异步：从后端恢复专题列表（localStorage 为空或被清除时自动补齐）
@@ -1028,6 +1029,7 @@ async function uploadFile(file) {
 function renderDocuments() {
   if (!state.documents.length) {
     els.fileList.innerHTML = '<div class="note">暂无文件。请上传 PDF 或 Excel。</div>';
+    updateRunTopicButton();
     return;
   }
 
@@ -1061,6 +1063,7 @@ function renderDocuments() {
       </div>
     `;
   }).join("");
+  updateRunTopicButton();
 }
 
 function selectDocument(documentId) {
@@ -1745,12 +1748,26 @@ function setProcessingRunning(running, taskId = state.activeProcessingTaskId) {
     els.cancelRunTopicBtn.style.display = running ? "" : "none";
     els.cancelRunTopicBtn.disabled = !running;
   }
-  const runBtn = document.getElementById("runTopicBtn");
-  if (runBtn) {
-    runBtn.disabled = running;
-    runBtn.textContent = running ? "处理中..." : "处理选中专题";
-  }
+  updateRunTopicButton();
   persistState();
+}
+
+function getRunTopicBlockReason() {
+  if (state.processingRunning) return "专题正在处理中，可以点击“停止处理”等待当前任务停止。";
+  const activeDoc = getActiveDocument();
+  if (!activeDoc) return "请先选择要分析处理的上传文件。";
+  if (activeDoc.status !== "ocr_completed") return "当前文件还没有完成 OCR/页面导入，请先处理当前文件。";
+  if (!state.topics.some((topic) => topic.selected)) return "请先在专题列表里勾选至少一个专题。";
+  return "";
+}
+
+function updateRunTopicButton() {
+  const runBtn = document.getElementById("runTopicBtn");
+  if (!runBtn) return;
+  const reason = getRunTopicBlockReason();
+  runBtn.disabled = Boolean(state.processingRunning);
+  runBtn.textContent = state.processingRunning ? "处理中..." : "处理选中专题";
+  runBtn.title = reason || "生成选中专题的页面池和叙事单元 ZIP。";
 }
 
 function ensureProcessingNotCancelled() {
@@ -2104,11 +2121,13 @@ function renderTopics() {
 
   if (state.topicCollapsed) {
     els.topicList.innerHTML = toolbar;
+    updateRunTopicButton();
     return;
   }
 
   if (!state.topics.length) {
     els.topicList.innerHTML = `${toolbar}<div class="note">暂无专题。可以先让 AI 分析，或手动输入专题后点击「添加/确认专题」。</div>`;
+    updateRunTopicButton();
     return;
   }
 
@@ -2125,6 +2144,7 @@ function renderTopics() {
       <button type="button" class="topic-delete-btn" onclick="deleteTopic(${index})" title="删除此专题">删除</button>
     </div>
   `).join("")}</div>`;
+  updateRunTopicButton();
 }
 
 function topicDetailText(topic) {
@@ -2558,8 +2578,11 @@ async function resumeActiveProjectTasks() {
     return;
   }
 
+  let hasProcessingTask = false;
   for (const task of tasks) {
     const taskId = String(task.id);
+    const isProcessingTask = ["page_pool", "page_pool_batch", "narrative"].includes(task.task_type);
+    if (isProcessingTask) hasProcessingTask = true;
     if (state.polling.has(taskId)) continue;
     const payload = task.payload || {};
     const result = task.result || {};
@@ -2591,10 +2614,19 @@ async function resumeActiveProjectTasks() {
       continue;
     }
 
-    if (["page_pool", "page_pool_batch", "narrative"].includes(task.task_type)) {
+    if (isProcessingTask) {
       setProcessingRunning(true, taskId);
       resumeProcessingTask(task);
     }
+  }
+
+  if (!hasProcessingTask && state.processingRunning && state.activeProcessingTaskId) {
+    state.processingRunning = false;
+    state.activeProcessingTaskId = null;
+    hideProgress();
+    updateRunTopicButton();
+    persistState();
+    addNotice("未发现正在运行的专题处理任务，已解除上次中断留下的处理状态。");
   }
 }
 

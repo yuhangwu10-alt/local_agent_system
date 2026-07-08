@@ -30,8 +30,10 @@ GENERIC_NARRATIVE_EXPORT_FIELDS = [
 
 def _sanitize_sheet_name(name: str) -> str:
     """BE-013: 清理 Excel sheet 名，截断到 31 字符，替换非法字符"""
+    # 移除所有 ASCII 控制字符 (0x00-0x1F) 和 DEL (0x7F)，这些会导致 openpyxl 报错
+    cleaned = re.sub(r'[\x00-\x1f\x7f]', '', str(name))
     # 替换 Excel 不允许的字符
-    cleaned = re.sub(r'[\[\]:*?/\\]', '_', name)
+    cleaned = re.sub(r'[\[\]:*?/\\]', '_', cleaned)
     # 截断到 31 字符
     return cleaned[:31] if cleaned else "Sheet1"
 
