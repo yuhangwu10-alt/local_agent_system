@@ -275,6 +275,11 @@ async def run_keyword_completion(
         raise
 
     batch_results.sort(key=lambda x: x["batch_no"])
+    all_batches_failed = batch_results and all(br.get("error") for br in batch_results)
+    if all_batches_failed:
+        reasons = "；".join(str(br.get("error") or "未知错误") for br in batch_results[:3])
+        raise RuntimeError(f"关键词补全批次全部失败：{reasons}")
+
     await task_manager.update_progress(t_id, 85, {"current": total, "total": total, "type": "keyword"})
 
     consolidated = await _consolidate_keywords(batch_results, topic_name, llm_config)

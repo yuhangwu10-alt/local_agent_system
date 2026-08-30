@@ -118,23 +118,19 @@ async def _extract_one_batch(
         pages_text="\n\n---\n\n".join(page_entries),
     )
 
-    try:
-        async with sem:
-            response = await llm_service.chat([
-                {"role": "system", "content": f"你是中国地方志结构化提取助手。请从页面中提取与「{theme_name}」相关的叙事单元。必须严格使用用户给出的中文 JSON 字段名，禁止英文 key、繁体别名和额外字段，只输出 JSON。"},
-                {"role": "user", "content": prompt},
-            ], runtime_config=llm_config)
-        parsed = _parse_json(response)
-        units = parsed.get("叙事单元", [])
-        # 补充 page_id 映射
-        page_no_to_score = {page.page_no: pool_entry.score for pool_entry, page in pages}
-        for unit in units:
-            pno = unit.get("来源页码", 0)
-            unit["_confidence"] = page_no_to_score.get(pno, 0)
-        return units
-    except Exception as e:
-        logger.error(f"LLM 叙事提取批次失败: {e}")
-        return []
+    async with sem:
+        response = await llm_service.chat([
+            {"role": "system", "content": f"你是中国地方志结构化提取助手。请从页面中提取与「{theme_name}」相关的叙事单元。必须严格使用用户给出的中文 JSON 字段名，禁止英文 key、繁体别名和额外字段，只输出 JSON。"},
+            {"role": "user", "content": prompt},
+        ], runtime_config=llm_config)
+    parsed = _parse_json(response)
+    units = parsed.get("叙事单元", [])
+    # 补充 page_id 映射
+    page_no_to_score = {page.page_no: pool_entry.score for pool_entry, page in pages}
+    for unit in units:
+        pno = unit.get("来源页码", 0)
+        unit["_confidence"] = page_no_to_score.get(pno, 0)
+    return units
 
 
 # ============================================================
@@ -212,6 +208,11 @@ async def run_narrative_extraction(task_id, theme_id, **kwargs):
             progress = int(completed / len(batches) * 90) + 5
             await task_manager.update_progress(t_id, progress, {"current": min(completed * NARRATIVE_BATCH_SIZE, total), "total": total, "type": "narrative"})
     except asyncio.CancelledError:
+        for task in futures:
+            task.cancel()
+        await asyncio.gather(*futures, return_exceptions=True)
+        raise
+    except Exception:
         for task in futures:
             task.cancel()
         await asyncio.gather(*futures, return_exceptions=True)

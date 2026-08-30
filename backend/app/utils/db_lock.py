@@ -31,6 +31,10 @@ async def acquire_advisory_lock_with_retry(
     这样即使有残留事务卡着锁，也能自动清理并继续写库，
     不会让 LLM 提取结果烂在内存里。
     """
+    if db.get_bind().dialect.name == "sqlite":
+        # SQLite 没有 PostgreSQL advisory lock；本地单进程试跑时直接依赖写串行化。
+        return
+
     deadline = asyncio.get_event_loop().time() + max_wait
     retry_interval = INITIAL_RETRY_INTERVAL
     attempt = 0

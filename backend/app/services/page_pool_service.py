@@ -321,21 +321,13 @@ async def _score_one_batch(
         page_list="\n\n---\n\n".join(page_entries),
     )
 
-    try:
-        async with sem:
-            response = await llm_service.chat([
-                {"role": "system", "content": "你是一个中国方志页面评分助手。请只输出 JSON，不要其他文字。"},
-                {"role": "user", "content": prompt},
-            ], runtime_config=llm_config)
-        parsed = _parse_json(response)
-        return parsed.get("评分列表", [])
-    except Exception as e:
-        logger.error(f"LLM 页面评分批次失败: {e}")
-        # 失败时返回全部排除
-        return [
-            {"page_id": str(page.id), "page_no": page.page_no, "分数": 0, "等级": "excluded", "理由": f"评分失败: {e}"}
-            for page in pages
-        ]
+    async with sem:
+        response = await llm_service.chat([
+            {"role": "system", "content": "你是一个中国方志页面评分助手。请只输出 JSON，不要其他文字。"},
+            {"role": "user", "content": prompt},
+        ], runtime_config=llm_config)
+    parsed = _parse_json(response)
+    return parsed.get("评分列表", [])
 
 
 async def _score_multi_theme_batch(
@@ -366,20 +358,16 @@ async def _score_multi_theme_batch(
         page_list="\n\n---\n\n".join(page_entries),
     )
 
-    try:
-        async with sem:
-            response = await llm_service.chat(
-                [
-                    {"role": "system", "content": "你是一个中国方志多专题页面池评分助手。请只输出 JSON，不要其他文字。"},
-                    {"role": "user", "content": prompt},
-                ],
-                runtime_config=llm_config,
-            )
-        parsed = _parse_json(response)
-        return parsed.get("评分列表", [])
-    except Exception as e:
-        logger.error(f"LLM 多专题页面评分批次失败: {e}")
-        return []
+    async with sem:
+        response = await llm_service.chat(
+            [
+                {"role": "system", "content": "你是一个中国方志多专题页面池评分助手。请只输出 JSON，不要其他文字。"},
+                {"role": "user", "content": prompt},
+            ],
+            runtime_config=llm_config,
+        )
+    parsed = _parse_json(response)
+    return parsed.get("评分列表", [])
 
 
 def _coerce_score(value) -> int:
@@ -464,6 +452,11 @@ async def run_page_pool_generation(task_id, theme_id, **kwargs):
             progress = int(completed / len(batches) * 90) + 5
             await task_manager.update_progress(t_id, progress, {"current": min(completed * LLM_SCORE_BATCH_SIZE, len(scorable)), "total": len(scorable), "type": "pool"})
     except asyncio.CancelledError:
+        for task in futures:
+            task.cancel()
+        await asyncio.gather(*futures, return_exceptions=True)
+        raise
+    except Exception:
         for task in futures:
             task.cancel()
         await asyncio.gather(*futures, return_exceptions=True)
@@ -627,6 +620,11 @@ async def run_multi_theme_page_pool_generation(task_id, theme_ids, **kwargs):
                 },
             )
     except asyncio.CancelledError:
+        for task in futures:
+            task.cancel()
+        await asyncio.gather(*futures, return_exceptions=True)
+        raise
+    except Exception:
         for task in futures:
             task.cancel()
         await asyncio.gather(*futures, return_exceptions=True)
