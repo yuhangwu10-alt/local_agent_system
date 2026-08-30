@@ -8,7 +8,8 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import UUID
+JSONB = sa.JSON
 
 revision: str = "001"
 down_revision: Union[str, None] = None
@@ -165,3 +166,5 @@ def downgrade() -> None:
     op.drop_table("theme_config")
     op.drop_table("source_document")
     op.drop_table("project")
+
+

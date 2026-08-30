@@ -9,8 +9,10 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db
+from app.api.deps import get_db, owned_document, owned_project, owned_theme
 from app.models.theme import ThemeConfig
+from app.models.platform import User
+from app.services.auth_service import get_current_user
 from app.models.project import Project
 from app.schemas.theme import ThemeConfigCreate, ThemeConfigResponse, ThemeConfigUpdate
 from app.services import llm_service
@@ -37,7 +39,7 @@ def _parse_topic_json(response: str) -> dict:
 
 
 @router.post("/themes/parse-topic-input")
-async def parse_topic_input(payload: dict = Body(default_factory=dict)):
+async def parse_topic_input(payload: dict = Body(default_factory=dict), _: User = Depends(get_current_user)):
     """从用户手动输入中解析专题及其专用字段，不读取完整底表。"""
     input_text = str(payload.get("input_text") or "").strip()
     if not input_text:
@@ -118,7 +120,8 @@ async def parse_topic_input(payload: dict = Body(default_factory=dict)):
                 {"role": "system", "content": "你是严谨的专题配置解析助手。请只输出 JSON，不要其他文字。"},
                 {"role": "user", "content": prompt},
             ],
-            runtime_config=payload.get("llm_config"),
+            runtime_config=None,
+            stage="topic_extraction",
         )
         parsed = _parse_topic_json(response)
     except Exception as e:
@@ -134,12 +137,10 @@ async def parse_topic_input(payload: dict = Body(default_factory=dict)):
 async def create_theme(
     project_id: uuid.UUID,
     data: ThemeConfigCreate,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = await owned_project(project_id, user, db)
 
     theme = ThemeConfig(
         project_id=project_id,
@@ -161,6 +162,7 @@ async def create_theme(
 @router.post("/themes/complete-keywords")
 async def complete_topic_keywords(
     payload: dict,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """手动专题关键词补全：分批理解全文 → LLM 汇总敲定关键词和描述"""
@@ -176,11 +178,7 @@ async def complete_topic_keywords(
         doc_id = uuid.UUID(str(document_id))
     except (ValueError, AttributeError):
         raise HTTPException(status_code=400, detail="无效的文件 ID 格式")
-    from app.models.project import SourceDocument
-    result = await db.execute(select(SourceDocument).where(SourceDocument.id == doc_id))
-    doc = result.scalar_one_or_none()
-    if doc is None:
-        raise HTTPException(status_code=404, detail="文档不存在")
+    doc = await owned_document(doc_id, user, db)
     if doc.status != "ocr_completed":
         raise HTTPException(status_code=400, detail="请先完成 OCR 处理")
 
@@ -191,16 +189,17 @@ async def complete_topic_keywords(
         proj_id=str(doc.project_id),
         document_id=str(document_id),
         topic_name=topic_name,
-        llm_config=payload.get("llm_config"),
+        llm_config=None,
         batch_size=payload.get("batch_size", 100),
-        llm_concurrency=payload.get("llm_concurrency", 5),
+        llm_concurrency=None,
     )
 
     return {"task_id": str(task_id), "status": "submitted", "message": f"专题「{topic_name}」关键词补全任务已提交"}
 
 
 @router.get("/projects/{project_id}/themes", response_model=list[ThemeConfigResponse])
-async def list_themes(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def list_themes(project_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await owned_project(project_id, user, db)
     result = await db.execute(
         select(ThemeConfig)
         .where(ThemeConfig.project_id == project_id)
@@ -210,11 +209,8 @@ async def list_themes(project_id: uuid.UUID, db: AsyncSession = Depends(get_db))
 
 
 @router.get("/themes/{theme_id}", response_model=ThemeConfigResponse)
-async def get_theme(theme_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(ThemeConfig).where(ThemeConfig.id == theme_id))
-    theme = result.scalar_one_or_none()
-    if theme is None:
-        raise HTTPException(status_code=404, detail="Theme not found")
+async def get_theme(theme_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    theme = await owned_theme(theme_id, user, db)
     return theme
 
 
@@ -222,12 +218,10 @@ async def get_theme(theme_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 async def update_theme(
     theme_id: uuid.UUID,
     data: ThemeConfigUpdate,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(ThemeConfig).where(ThemeConfig.id == theme_id))
-    theme = result.scalar_one_or_none()
-    if theme is None:
-        raise HTTPException(status_code=404, detail="Theme not found")
+    theme = await owned_theme(theme_id, user, db)
 
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -239,11 +233,8 @@ async def update_theme(
 
 
 @router.delete("/themes/{theme_id}", status_code=204)
-async def delete_theme(theme_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(ThemeConfig).where(ThemeConfig.id == theme_id))
-    theme = result.scalar_one_or_none()
-    if theme is None:
-        raise HTTPException(status_code=404, detail="Theme not found")
+async def delete_theme(theme_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    theme = await owned_theme(theme_id, user, db)
     await db.delete(theme)
     await db.commit()
 
@@ -252,19 +243,17 @@ async def delete_theme(theme_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 async def import_theme(
     project_id: uuid.UUID,
     config: ThemeConfigCreate,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """导入 theme_config.json"""
-    return await create_theme(project_id, config, db)
+    return await create_theme(project_id, config, user, db)
 
 
 @router.get("/themes/{theme_id}/export-config")
-async def export_theme_config(theme_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def export_theme_config(theme_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """导出 theme_config.json"""
-    result = await db.execute(select(ThemeConfig).where(ThemeConfig.id == theme_id))
-    theme = result.scalar_one_or_none()
-    if theme is None:
-        raise HTTPException(status_code=404, detail="Theme not found")
+    theme = await owned_theme(theme_id, user, db)
 
     config = {
         "theme": theme.theme,
@@ -292,7 +281,7 @@ async def export_theme_config(theme_id: uuid.UUID, db: AsyncSession = Depends(ge
 
 
 @router.post("/themes/export-list")
-async def export_topic_list(payload: dict = Body(default_factory=dict)):
+async def export_topic_list(payload: dict = Body(default_factory=dict), _: User = Depends(get_current_user)):
     """将前端专题列表导出为 Excel 文件"""
     raw_topics = payload.get("专题列表") or payload.get("topics") or []
     if not isinstance(raw_topics, list) or not raw_topics:
@@ -336,7 +325,7 @@ async def export_topic_list(payload: dict = Body(default_factory=dict)):
 
 
 @router.post("/themes/import-list")
-async def import_topic_list(file: UploadFile = File(...)):
+async def import_topic_list(file: UploadFile = File(...), _: User = Depends(get_current_user)):
     """从上传的 Excel 文件导入专题列表"""
     if not file.filename:
         raise HTTPException(status_code=400, detail="请上传 Excel 文件")

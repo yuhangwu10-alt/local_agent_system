@@ -8,7 +8,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db
+from app.api.deps import get_db, owned_project, owned_document, owned_theme
+from app.models.platform import User
+from app.services.auth_service import get_current_user
 from app.models.theme import ThemeConfig
 from app.services.export_service import (
     export_base_table,
@@ -25,9 +27,14 @@ router = APIRouter(prefix="/api", tags=["导出"])
 async def export_project_base_table(
     project_id: uuid.UUID,
     format: str = Query("excel", description="导出格式: excel/csv/json"),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """导出 OCR/页面导入后的底表。"""
+    await owned_project(project_id, user, db)
+    await owned_document(document_id, user, db)
+    await owned_project(project_id, user, db)
+    await owned_theme(theme_id, user, db)
     if format not in ("excel", "csv", "json"):
         raise HTTPException(status_code=400, detail=f"不支持的格式: {format}")
 

@@ -41,3 +41,8 @@ Thumbs.db
 # Node
 node_modules/
 frontend/dist/
+
+# Local test and development databases/artifacts
+backend/*.db
+/*.db
+storage/smoke_*

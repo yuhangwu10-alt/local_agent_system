@@ -195,7 +195,7 @@ async def run_classification(task_id, proj_id, document_id: str | None = None, l
                 response = await llm_service.chat([
                     {"role": "system", "content": "你是一个严谨的中国地方志页级文本结构化助手。"},
                     {"role": "user", "content": CLASSIFICATION_PROMPT.format(content=content)},
-                ], runtime_config=llm_config)
+                ], runtime_config=llm_config, stage="classification")
             classification = _parse_classification(response)
 
             # 补充计算字段

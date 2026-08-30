@@ -8,7 +8,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import JSONB
+JSONB = sa.JSON
 
 revision: str = "004"
 down_revision: Union[str, None] = "003"
@@ -22,3 +22,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_column("task", "payload")
+

@@ -8,6 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
+from app.services.auth_service import get_current_user
+from app.models.platform import User
 from app.models.project import Project
 from app.models.project import SourceDocument
 from app.models.task import Task
@@ -22,8 +24,8 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
 @router.post("", response_model=ProjectResponse, status_code=201)
-async def create_project(data: ProjectCreate, db: AsyncSession = Depends(get_db)):
-    project = Project(name=data.name, description=data.description)
+async def create_project(data: ProjectCreate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    project = Project(user_id=user.id, name=data.name, description=data.description)
     db.add(project)
     await db.commit()
     await db.refresh(project)
@@ -31,14 +33,20 @@ async def create_project(data: ProjectCreate, db: AsyncSession = Depends(get_db)
 
 
 @router.get("", response_model=list[ProjectResponse])
-async def list_projects(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).order_by(Project.created_at.desc()))
+async def list_projects(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    query = select(Project).order_by(Project.created_at.desc())
+    if user.role != "admin":
+        query = query.where(Project.user_id == user.id)
+    result = await db.execute(query)
     return result.scalars().all()
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
-async def get_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).where(Project.id == project_id))
+async def get_project(project_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    query = select(Project).where(Project.id == project_id)
+    if user.role != "admin":
+        query = query.where(Project.user_id == user.id)
+    result = await db.execute(query)
     project = result.scalar_one_or_none()
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -46,8 +54,11 @@ async def get_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db))
 
 
 @router.delete("/{project_id}", status_code=204)
-async def delete_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).where(Project.id == project_id))
+async def delete_project(project_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    query = select(Project).where(Project.id == project_id)
+    if user.role != "admin":
+        query = query.where(Project.user_id == user.id)
+    result = await db.execute(query)
     project = result.scalar_one_or_none()
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -106,3 +117,6 @@ async def delete_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_d
             f.unlink(missing_ok=True)
         except Exception as e:
             logger.warning(f"清理文件失败 {f}: {e}")
+
+
+

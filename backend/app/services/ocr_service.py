@@ -13,6 +13,7 @@ from app.providers.ocr.qwen_vl import QwenVLOCR
 from app.providers.ocr.openai_vision import OpenAIVisionOCR
 from app.services import pdf_service, excel_service
 from app.services.task_manager import task_manager
+from app.services.llm_service import get_platform_model_config
 from app.utils.file_storage import get_input_dir, get_page_images_dir, safe_join, ensure_dir
 
 logger = logging.getLogger(__name__)
@@ -97,7 +98,9 @@ async def run_ocr_task(task_id: UUID, document_id: str, **kwargs):
 
     try:
         batch_size = _normalize_ocr_batch_size(kwargs.get("ocr_batch_size"))
-        runtime_config = _normalize_ocr_runtime_config(kwargs.get("ocr_config"))
+        # OCR credentials and model selection are administrator-owned. The
+        # legacy runtime field is intentionally ignored for security.
+        runtime_config, ocr_semaphore = await get_platform_model_config("ocr")
 
         recovered = bool(kwargs.get("recovered"))
 
@@ -107,6 +110,7 @@ async def run_ocr_task(task_id: UUID, document_id: str, **kwargs):
                 t_id,
                 batch_size=batch_size,
                 runtime_config=runtime_config,
+                ocr_semaphore=ocr_semaphore,
                 recovered=recovered,
             )
         else:
@@ -173,6 +177,7 @@ async def _ocr_pdf(
     *,
     batch_size: int = 1,
     runtime_config: dict | None = None,
+    ocr_semaphore: asyncio.Semaphore | None = None,
     recovered: bool = False,
 ) -> float:
     """处理 PDF 文档的 OCR（逐页处理，避免内存问题），返回失败页比例"""
@@ -213,7 +218,11 @@ async def _ocr_pdf(
             img_path = images_dir / f"page_{page_no:04d}.jpg"
             img_path.write_bytes(img_bytes)
 
-            text, confidence = await provider.recognize(img_bytes)
+            if ocr_semaphore is None:
+                text, confidence = await provider.recognize(img_bytes)
+            else:
+                async with ocr_semaphore:
+                    text, confidence = await provider.recognize(img_bytes)
             page = PageContent(
                 document_id=doc.id,
                 page_no=page_no,

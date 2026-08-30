@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.providers.ocr.qwen_vl import OCR_PROMPT
 from app.services.classification_service import CLASSIFICATION_PROMPT
@@ -8,6 +8,8 @@ from app.services.narrative_service import NARRATIVE_EXTRACTION_PROMPT
 from app.services.ocr_config_service import list_provider_models, public_providers
 from app.services.page_pool_service import LLM_SCORING_PROMPT
 from app.services.topic_extraction_service import BATCH_EXTRACTION_PROMPT, CONSOLIDATION_PROMPT
+from app.models.platform import User
+from app.services.auth_service import require_admin
 
 router = APIRouter(prefix="/api/ocr", tags=["ocr-config"])
 
@@ -42,7 +44,7 @@ async def get_default_prompts():
 
 
 @router.post("/models")
-async def get_ocr_models(payload: ModelListRequest):
+async def get_ocr_models(payload: ModelListRequest, _: User = Depends(require_admin)):
     try:
         models = await list_provider_models(payload.provider, payload.api_key)
     except ValueError as e:

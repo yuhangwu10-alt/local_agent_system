@@ -12,6 +12,7 @@ class Project(Base):
     __tablename__ = "project"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="created")
@@ -22,12 +23,14 @@ class Project(Base):
     themes: Mapped[list["ThemeConfig"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     chat_sessions: Mapped[list["ChatSession"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     tasks: Mapped[list["Task"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    owner: Mapped["User | None"] = relationship(back_populates="projects")
 
 
 class SourceDocument(Base):
     __tablename__ = "source_document"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True, index=True)
     project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("project.id", ondelete="CASCADE"))
     file_type: Mapped[str] = mapped_column(String(10), nullable=False)
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
@@ -39,3 +42,5 @@ class SourceDocument(Base):
 
     project: Mapped["Project"] = relationship(back_populates="documents")
     pages: Mapped[list["PageContent"]] = relationship(back_populates="document", cascade="all, delete-orphan")
+
+

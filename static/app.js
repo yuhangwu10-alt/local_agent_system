@@ -25,11 +25,151 @@ const state = {
   defaultPrompts: { ocr: "", llm: "" },
   activeExtractionTaskId: null,
   activeProcessingTaskId: null,
+  authToken: localStorage.getItem("fangzhi_auth_token") || "",
+  user: null,
+  workspaces: [],
   processingRunning: false,
   processingCancelled: false,
 };
 
 const MAX_THEMES_PER_POOL_BATCH = 8;
+async function ensureAuth() {
+  if (state.authToken) {
+    try {
+      state.user = await api("/api/auth/me");
+      return;
+    } catch (_) {
+      state.authToken = "";
+      localStorage.removeItem("fangzhi_auth_token");
+    }
+  }
+  return new Promise((resolve, reject) => {
+    const overlay = document.createElement("div");
+    overlay.className = "auth-screen";
+    overlay.innerHTML = `
+      <div class="auth-panel">
+        <div class="auth-mark">志</div>
+        <div class="auth-kicker">FANGZHI WORKSPACE</div>
+        <h1>进入你的研究工作台</h1>
+        <p>登录后管理多个资料任务、提取方向与处理结果。</p>
+        <form id="authForm">
+          <input id="authEmail" type="email" placeholder="邮箱" required autocomplete="email">
+          <input id="authName" type="text" placeholder="显示名称（注册时填写）" autocomplete="name">
+          <input id="authPassword" type="password" placeholder="密码，至少 8 位" required autocomplete="current-password">
+          <button class="auth-submit" type="submit">登录</button>
+        </form>
+        <button class="auth-switch" type="button">没有账号？注册</button>
+        <div class="auth-error" aria-live="polite"></div>
+      </div>`;
+    document.body.appendChild(overlay);
+    let registerMode = false;
+    const form = overlay.querySelector("#authForm");
+    const nameInput = overlay.querySelector("#authName");
+    const submit = overlay.querySelector(".auth-submit");
+    const switchBtn = overlay.querySelector(".auth-switch");
+    const error = overlay.querySelector(".auth-error");
+    switchBtn.addEventListener("click", () => {
+      registerMode = !registerMode;
+      nameInput.required = registerMode;
+      nameInput.style.display = registerMode ? "block" : "none";
+      submit.textContent = registerMode ? "注册并进入" : "登录";
+      switchBtn.textContent = registerMode ? "已有账号？登录" : "没有账号？注册";
+    });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      error.textContent = "";
+      try {
+        const payload = { email: overlay.querySelector("#authEmail").value, password: overlay.querySelector("#authPassword").value };
+        let data;
+        if (registerMode) {
+          payload.display_name = nameInput.value;
+          data = await rawApi("/api/auth/register", { method: "POST", body: JSON.stringify(payload) });
+        } else {
+          data = await rawApi("/api/auth/login", { method: "POST", body: JSON.stringify(payload) });
+        }
+        state.authToken = data.token;
+        state.user = data.user;
+        localStorage.setItem("fangzhi_auth_token", state.authToken);
+        overlay.remove();
+        resolve();
+      } catch (requestError) {
+        error.textContent = requestError.message;
+      }
+    });
+  });
+}
+
+async function rawApi(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (state.authToken && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${state.authToken}`);
+  if (!headers.has("Content-Type") && options.body && !(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
+  const response = await fetch(url, { ...options, headers });
+  if (!response.ok) throw new Error(await readError(response));
+  return response.status === 204 ? null : response.json();
+}
+
+async function loadWorkspaceShell() {
+  state.workspaces = await api("/api/projects");
+  if (!document.querySelector(".app-sidebar")) {
+    const sidebar = document.createElement("aside");
+    sidebar.className = "app-sidebar";
+    sidebar.innerHTML = `<div class="sidebar-brand"><span class="sidebar-mark">志</span><span>方志工作台</span></div><button class="new-workspace-btn" type="button">＋ 新建研究任务</button><div class="sidebar-label">研究任务</div><div class="workspace-list"></div><div class="sidebar-footer"><button class="wallet-chip" type="button" title="兑换余额"><span>余额</span> <strong class="wallet-balance">--</strong></button><button class="logout-btn" type="button">退出登录</button></div>`;
+    document.querySelector(".app")?.prepend(sidebar);
+    sidebar.querySelector(".new-workspace-btn").addEventListener("click", async () => {
+      const name = window.prompt("研究任务名称", "新的地方志研究任务");
+      if (!name?.trim()) return;
+      state.project = await api("/api/projects", { method: "POST", body: JSON.stringify({ name: name.trim() }) });
+      state.workspaces.unshift(state.project);
+      renderWorkspaceList();
+      await refreshDocuments();
+    });
+    sidebar.querySelector(".wallet-chip").addEventListener("click", redeemBalance);
+    sidebar.querySelector(".logout-btn").addEventListener("click", () => { localStorage.removeItem("fangzhi_auth_token"); window.location.reload(); });
+  }
+  renderWorkspaceList();
+  const me = state.user || await api("/api/auth/me");
+  state.user = me;
+  const balance = document.querySelector(".wallet-balance");
+  if (balance) balance.textContent = Number(me.balance || 0).toFixed(2);
+}
+
+async function refreshWallet() {
+  const me = await api("/api/auth/me");
+  state.user = { ...(state.user || {}), ...me };
+  const balance = document.querySelector(".wallet-balance");
+  if (balance) balance.textContent = Number(me.balance || 0).toFixed(2);
+  return me;
+}
+
+async function redeemBalance() {
+  const code = window.prompt("输入兑换码");
+  if (!code?.trim()) return;
+  try {
+    const result = await api("/api/wallet/redeem", { method: "POST", body: JSON.stringify({ code: code.trim() }) });
+    await refreshWallet();
+    addNotice(`兑换成功，已增加余额 ${Number(result.credited || 0).toFixed(2)}`);
+  } catch (error) {
+    addMessage("agent", `兑换失败：${error.message}`);
+  }
+}
+
+function renderWorkspaceList() {
+  const list = document.querySelector(".workspace-list");
+  if (!list) return;
+  list.innerHTML = state.workspaces.length ? state.workspaces.map((item) => `<button class="workspace-item ${state.project?.id === item.id ? "active" : ""}" data-project-id="${item.id}" type="button"><span class="workspace-dot"></span><span class="workspace-name">${escapeHtml(item.name)}</span></button>`).join("") : `<div class="workspace-empty">还没有研究任务</div>`;
+  list.querySelectorAll("[data-project-id]").forEach((button) => button.addEventListener("click", () => switchWorkspace(button.dataset.projectId)));
+}
+
+async function switchWorkspace(projectId) {
+  if (state.project?.id === projectId) return;
+  state.project = state.workspaces.find((item) => item.id === projectId) || await api(`/api/projects/${projectId}`);
+  state.activeDocumentId = null;
+  state.documents = [];
+  state.chatSession = null;
+  await refreshDocuments();
+  renderWorkspaceList();
+  addNotice(`已切换到研究任务：${state.project.name}`);
+}
 
 const els = {
   workflowStatus: document.getElementById("workflowStatus"),
@@ -108,12 +248,15 @@ async function init() {
 
   try {
     await loadAppInfo();
+    await ensureAuth();
     await loadOcrProviders();
     await loadDefaultPrompts();
     loadPersistedModelConfigs();
     updateModelButtonStatus();
     loadPersistedState();
+    await loadWorkspaceShell();
     await ensureProject();
+    renderWorkspaceList();
     await refreshDocuments();
     setStep(state.currentStep || "upload");
   } catch (error) {
@@ -534,20 +677,7 @@ function composeOcrPrompt(basePrompt, languageHint) {
 function getOcrConfig() {
   const batchSize = Math.max(1, Math.min(50, Number(els.ocrBatchSize?.value || 1)));
   if (els.ocrBatchSize) els.ocrBatchSize.value = String(batchSize);
-  const cfg = state.ocrModelConfig;
-  const apiKey = state.apiKeys[cfg.provider] || "";
-  const basePrompt = (cfg.prompt || "").trim();
-  const defaultOcrPrompt = /加载失败/.test(state.defaultPrompts.ocr || "") ? "" : state.defaultPrompts.ocr;
-  const promptBase = basePrompt || ((cfg.languageHint || "").trim() ? defaultOcrPrompt : "");
-  const prompt = composeOcrPrompt(promptBase, cfg.languageHint);
-  const ocrConfig = cfg.provider && apiKey && cfg.model
-    ? { provider: cfg.provider, api_key: apiKey, model: cfg.model }
-    : null;
-  if (ocrConfig && prompt) ocrConfig.prompt = prompt;
-  return {
-    ocr_batch_size: batchSize,
-    ocr_config: ocrConfig,
-  };
+  return { ocr_batch_size: batchSize };
 }
 
 function normalizeEvidencePages(topic) {
@@ -640,14 +770,7 @@ function buildTopicContext() {
 }
 
 function getLlmConfig() {
-  const cfg = state.llmModelConfig;
-  const apiKey = state.apiKeys[cfg.provider] || "";
-  const prompt = (cfg.prompt || "").trim();
-  const llmConfig = cfg.provider && apiKey && cfg.model
-    ? { provider: cfg.provider, api_key: apiKey, model: cfg.model }
-    : null;
-  if (llmConfig && prompt) llmConfig.prompt = prompt;
-  return llmConfig;
+  return null;
 }
 
 function openModelModal(type) {
@@ -956,12 +1079,6 @@ function deletePromptFromHistory() {
 }
 
 function ensureOcrConfigForPdf(doc) {
-  if (doc.file_type !== "pdf") return true;
-  const { ocr_config } = getOcrConfig();
-  if (!ocr_config) {
-    addMessage("agent", "请先点击「OCR 模型」按钮配置模型厂商、API Key 和模型名。");
-    return false;
-  }
   return true;
 }
 
@@ -1004,6 +1121,12 @@ async function refreshDocuments() {
   persistState();
   resumeOcrPolling();
   resumeActiveProjectTasks();
+}
+
+async function createDocumentQuote(documentId) {
+  const quote = await api("/api/billing/quote", { method: "POST", body: JSON.stringify({ project_id: state.project.id, document_ids: [documentId] }) });
+  const confirmed = window.confirm(`本次将处理 ${quote.units}${quote.unit_type}，预计扣除 ${Number(quote.total || 0).toFixed(2)} 元。\n确认继续吗？`);
+  return confirmed ? quote.id : null;
 }
 
 async function uploadFile(file) {
@@ -1084,8 +1207,7 @@ async function deleteDocument(documentId) {
   if (!ok) return;
 
   try {
-    const response = await fetch(`/api/documents/${documentId}`, { method: "DELETE" });
-    if (!response.ok) throw new Error(await readError(response));
+    await api(`/api/documents/${documentId}`, { method: "DELETE" });
     delete state.docStates[documentId];
     if (state.activeDocumentId === documentId) state.activeDocumentId = null;
     await refreshDocuments();
@@ -1114,10 +1236,12 @@ async function runOcr(documentId = state.activeDocumentId) {
   persistState();
 
   try {
+    const quoteId = await createDocumentQuote(documentId);
+    if (!quoteId) { doc.status = "registered"; renderDocuments(); return; }
     const result = await api(`/api/documents/${documentId}/ocr`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(getOcrConfig()),
+      body: JSON.stringify({ ...getOcrConfig(), quote_id: quoteId }),
     });
     addMessage("agent", `任务已提交，正在处理文件「${doc.file_name}」。任务 ID：${result.task_id}`);
     setDocOcrTaskId(documentId, result.task_id);
@@ -1219,9 +1343,7 @@ async function discussWithAI() {
 
 async function confirmTopicsFromChatSession(sessionId) {
   try {
-    const llmConfig = getLlmConfig();
     const payload = { topic_context: buildTopicContext() };
-    if (llmConfig) payload.llm_config = llmConfig;
 
     const result = await api(`/api/chat/sessions/${sessionId}/confirm-topics`, {
       method: "POST",
@@ -1296,7 +1418,6 @@ async function streamChat(sessionId, content, onChunk) {
       body: JSON.stringify({
         content,
         document_id: activeDoc?.id || null,
-        llm_config: getLlmConfig(),
         topic_context: buildTopicContext(),
       }),
       signal: controller.signal,
@@ -1481,9 +1602,6 @@ function extractBatchPoolResults(task) {
 }
 
 async function generatePagePoolsForTopics(topics) {
-  const concurrency = Math.max(1, Number(els.classifyConcurrency?.value || 5));
-  if (els.classifyConcurrency) els.classifyConcurrency.value = String(concurrency);
-  const llmConfig = getLlmConfig();
   const chunks = chunkArray(topics, MAX_THEMES_PER_POOL_BATCH);
   const results = new Map();
   if (chunks.length > 1) {
@@ -1495,9 +1613,7 @@ async function generatePagePoolsForTopics(topics) {
     const chunk = chunks[index];
     const payload = {
       theme_ids: chunk.map((topic) => topic.theme.id),
-      llm_concurrency: concurrency,
     };
-    if (llmConfig) payload.llm_config = llmConfig;
 
     setStep("pool", `正在联合生成页面池（第 ${index + 1}/${chunks.length} 组，${chunk.length} 个专题）`);
     const poolTask = await api("/api/themes/page-pool/generate-batch", {
@@ -1522,11 +1638,7 @@ async function generatePagePoolsForTopics(topics) {
 
 async function processTopicNarrative(topic) {
   const theme = topic.theme;
-  const concurrency = Math.max(1, Number(els.classifyConcurrency?.value || 5));
-  if (els.classifyConcurrency) els.classifyConcurrency.value = String(concurrency);
-  const llmConfig = getLlmConfig();
-  const payload = { llm_concurrency: concurrency };
-  if (llmConfig) payload.llm_config = llmConfig;
+  const payload = {};
 
   setStep("narrative", `正在提取「${theme.theme}」叙事单元`);
   try {
@@ -1820,10 +1932,7 @@ async function triggerBatchExtraction() {
   if (!(await ensureOutputDirectory())) return;
 
   const batchSize = Math.max(10, Math.min(500, Number(els.topicBatchSize?.value || 100)));
-  const llmConfig = getLlmConfig();
-
-  const payload = { batch_size: batchSize, llm_concurrency: 1 };
-  if (llmConfig) payload.llm_config = llmConfig;
+  const payload = { batch_size: batchSize };
 
   try {
     setStep("topic", `正在批量提取专题...`);
@@ -2048,7 +2157,6 @@ async function completeKeywordsForTopic(topicName) {
   const activeDoc = getActiveDocument();
   if (!activeDoc || activeDoc.status !== "ocr_completed") return;
 
-  const llmConfig = getLlmConfig();
   const topic = state.topics.find((t) => t.name === topicName);
   if (!topic || topic._keywords?.["核心词"]?.length) return;
 
@@ -2058,7 +2166,6 @@ async function completeKeywordsForTopic(topicName) {
 
   try {
     const payload = {};
-    if (llmConfig) payload.llm_config = llmConfig;
     payload.topic_name = topicName;
     payload.document_id = activeDoc.id;
 
@@ -3045,10 +3152,7 @@ function setWorkflowStatus(text) {
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, options);
-  if (!response.ok) throw new Error(await readError(response));
-  if (response.status === 204) return null;
-  return response.json();
+  return rawApi(url, options);
 }
 
 async function readError(response) {
@@ -3093,3 +3197,8 @@ window.toggleTopicPanel = toggleTopicPanel;
 window.deleteTopic = deleteTopic;
 window.downloadOutput = downloadOutput;
 window.closeManualTopicModal = closeManualTopicModal;
+
+
+
+
+

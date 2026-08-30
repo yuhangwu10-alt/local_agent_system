@@ -122,7 +122,7 @@ async def _extract_one_batch(
         response = await llm_service.chat([
             {"role": "system", "content": f"你是中国地方志结构化提取助手。请从页面中提取与「{theme_name}」相关的叙事单元。必须严格使用用户给出的中文 JSON 字段名，禁止英文 key、繁体别名和额外字段，只输出 JSON。"},
             {"role": "user", "content": prompt},
-        ], runtime_config=llm_config)
+        ], runtime_config=llm_config, stage="narrative")
     parsed = _parse_json(response)
     units = parsed.get("叙事单元", [])
     # 补充 page_id 映射

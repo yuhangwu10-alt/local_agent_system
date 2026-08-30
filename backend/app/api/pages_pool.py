@@ -5,9 +5,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db
+from app.api.deps import get_db, owned_theme, owned_pool_entry, owned_page
 from app.models.page import PageContent, PagePool
 from app.models.theme import ThemeConfig
+from app.models.platform import User
+from app.services.auth_service import get_current_user
 from app.schemas.page import PagePoolCreate, PagePoolResponse, PagePoolUpdate
 from app.services.task_manager import task_manager
 from app.services.page_pool_service import (
@@ -23,21 +25,20 @@ router = APIRouter(prefix="/api", tags=["page-pool"])
 async def generate_page_pool(
     theme_id: uuid.UUID,
     payload: dict = Body(default_factory=dict),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """触发页面池生成任务"""
-    result = await db.execute(select(ThemeConfig).where(ThemeConfig.id == theme_id))
-    theme = result.scalar_one_or_none()
-    if theme is None:
-        raise HTTPException(status_code=404, detail="专题不存在")
+    theme = await owned_theme(theme_id, user, db)
 
     task_id = await task_manager.submit(
         task_type="page_pool",
         project_id=theme.project_id,
         coro_func=run_page_pool_generation,
+        quote_id=payload.get("quote_id"),
         theme_id=str(theme_id),
-        llm_config=payload.get("llm_config"),
-        llm_concurrency=payload.get("llm_concurrency", 5),
+        llm_config=None,
+        llm_concurrency=None,
     )
 
     return {"task_id": str(task_id), "status": "submitted"}
@@ -46,6 +47,7 @@ async def generate_page_pool(
 @router.post("/themes/page-pool/generate-batch")
 async def generate_page_pool_batch(
     payload: dict = Body(default_factory=dict),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """触发多专题联合页面池生成任务"""
@@ -72,6 +74,9 @@ async def generate_page_pool_batch(
     if missing:
         raise HTTPException(status_code=404, detail=f"专题不存在: {', '.join(missing)}")
 
+    for theme in themes:
+        await owned_theme(theme.id, user, db)
+
     project_ids = {theme.project_id for theme in themes}
     if len(project_ids) != 1:
         raise HTTPException(status_code=400, detail="所有专题必须属于同一个项目")
@@ -82,8 +87,7 @@ async def generate_page_pool_batch(
         project_id=project_id,
         coro_func=run_multi_theme_page_pool_generation,
         theme_ids=[str(theme_id) for theme_id in theme_ids],
-        llm_config=payload.get("llm_config"),
-        llm_concurrency=payload.get("llm_concurrency", 5),
+        quote_id=payload.get("quote_id"),
     )
 
     return {"task_id": str(task_id), "status": "submitted"}
@@ -94,8 +98,10 @@ async def list_page_pool(
     theme_id: uuid.UUID,
     generation: int | None = Query(None, description="指定版本，不传则返回最新"),
     relevance_level: str | None = Query(None, description="筛选标签: core/borderline/excluded"),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await owned_theme(theme_id, user, db)
     query = select(PagePool).where(PagePool.theme_id == theme_id)
 
     if generation is not None:
@@ -115,6 +121,7 @@ async def list_page_pool(
 async def add_page_to_pool(
     theme_id: uuid.UUID,
     data: PagePoolCreate,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """手动添加页面到页面池"""
@@ -123,17 +130,9 @@ async def add_page_to_pool(
     from app.models.page import PageContent
     from app.models.project import SourceDocument
 
-    # BE-011: 校验 theme 存在
-    theme = await db.execute(select(ThemeConfig).where(ThemeConfig.id == theme_id))
-    theme_obj = theme.scalar_one_or_none()
-    if theme_obj is None:
-        raise HTTPException(status_code=404, detail="专题不存在")
+    theme_obj = await owned_theme(theme_id, user, db)
 
-    # BE-011: 校验 page 存在
-    page = await db.execute(select(PageContent).where(PageContent.id == data.page_id))
-    page_obj = page.scalar_one_or_none()
-    if page_obj is None:
-        raise HTTPException(status_code=404, detail="页面不存在")
+    page_obj = await owned_page(data.page_id, user, db)
 
     # BE-011: 校验 page 属于同一 project
     doc = await db.execute(select(SourceDocument).where(SourceDocument.id == page_obj.document_id))
@@ -171,12 +170,10 @@ async def add_page_to_pool(
 async def update_page_pool_entry(
     entry_id: uuid.UUID,
     data: PagePoolUpdate,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(PagePool).where(PagePool.id == entry_id))
-    entry = result.scalar_one_or_none()
-    if entry is None:
-        raise HTTPException(status_code=404, detail="Page pool entry not found")
+    entry = await owned_pool_entry(entry_id, user, db)
 
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -198,10 +195,11 @@ async def update_page_pool_entry(
 
 
 @router.delete("/page-pool/{entry_id}", status_code=204)
-async def delete_page_pool_entry(entry_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(PagePool).where(PagePool.id == entry_id))
-    entry = result.scalar_one_or_none()
-    if entry is None:
-        raise HTTPException(status_code=404, detail="Page pool entry not found")
+async def delete_page_pool_entry(
+    entry_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    entry = await owned_pool_entry(entry_id, user, db)
     await db.delete(entry)
     await db.commit()

@@ -50,8 +50,8 @@
 
           <div class="ocr-config">
             <div class="data-head">
-              <strong>模型与并发</strong>
-              <span>分别配置 OCR 和文本处理模型</span>
+              <strong>处理参数</strong>
+              <span>模型与服务并发由平台统一管理</span>
             </div>
             <div class="config-inline">
               <label class="batch-label">
@@ -66,24 +66,6 @@
                 <span>专题批次</span>
                 <input id="topicBatchSize" type="number" min="10" max="500" value="100" />
               </label>
-            </div>
-            <div class="model-config-buttons">
-              <button type="button" class="model-config-btn" id="ocrModelBtn" onclick="openModelModal('ocr')">
-                <span class="btn-icon" aria-hidden="true">OCR</span>
-                <span class="btn-body">
-                  <span class="btn-label">OCR 模型</span>
-                  <span class="btn-status" id="ocrModelStatus">未配置</span>
-                </span>
-                <span class="btn-arrow" aria-hidden="true">›</span>
-              </button>
-              <button type="button" class="model-config-btn" id="llmModelBtn" onclick="openModelModal('llm')">
-                <span class="btn-icon" aria-hidden="true">AI</span>
-                <span class="btn-body">
-                  <span class="btn-label">文本处理模型</span>
-                  <span class="btn-status" id="llmModelStatus">未配置</span>
-                </span>
-                <span class="btn-arrow" aria-hidden="true">›</span>
-              </button>
             </div>
           </div>
 
@@ -296,64 +278,6 @@
       <div class="modal-footer">
         <span id="browseTopicsInfo" class="browse-topics-info"></span>
         <button type="button" class="modal-cancel-btn" onclick="closeBrowseTopicsModal()">关闭</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="modal-overlay" id="modelModal" style="display:none">
-    <div class="modal-card model-modal">
-      <div class="modal-header">
-        <strong id="modalTitle">配置模型</strong>
-        <button type="button" class="modal-close" onclick="closeModelModal()" aria-label="关闭">×</button>
-      </div>
-      <div class="modal-body">
-        <label>
-          <span>模型厂商</span>
-          <select id="modalProvider"></select>
-        </label>
-        <label>
-          <span>API Key</span>
-          <div class="api-key-row">
-            <input id="modalApiKey" type="password" autocomplete="off" placeholder="输入 API Key" />
-            <button type="button" id="modalApiKeyToggle" class="eye-btn" title="显示/隐藏 API Key">显示</button>
-          </div>
-        </label>
-        <label>
-          <span id="modalModelLabel">模型</span>
-          <div class="model-row">
-            <input id="modalModelInput" list="modalModelOptions" autocomplete="off" placeholder="可手动输入或从查询结果选择模型" />
-            <datalist id="modalModelOptions"></datalist>
-            <button id="modalQueryModelsBtn" type="button">查询模型</button>
-          </div>
-        </label>
-        <label id="modalOcrLanguageHintRow" class="ocr-language-row" style="display:none">
-          <span>页面文字提示</span>
-          <input id="modalOcrLanguageHint" type="text" autocomplete="off" placeholder="可选，如：繁体、满汉合璧、藏文夹注" />
-        </label>
-        <div class="prompt-config">
-          <div class="prompt-head">
-            <div>
-              <span>当前提示词</span>
-              <em id="modalPromptStatus">系统默认</em>
-            </div>
-            <div class="prompt-actions">
-              <button id="modalTogglePromptBtn" type="button">收起</button>
-              <button id="modalNewPromptBtn" type="button" title="新建提示词">+</button>
-            </div>
-          </div>
-          <div id="modalPromptPanel" class="prompt-panel">
-            <textarea id="modalPromptInput" class="prompt-textarea" readonly placeholder="点击 + 新建提示词，或从提示词列表选择。"></textarea>
-            <div class="prompt-history-row">
-              <select id="modalPromptHistory"></select>
-              <button id="modalApplyPromptBtn" type="button">选择</button>
-              <button id="modalDeletePromptBtn" type="button">删除</button>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="modal-cancel-btn" onclick="closeModelModal()">取消</button>
-        <button type="button" class="modal-confirm-btn" id="modalConfirmBtn" onclick="confirmModelConfig()">确认</button>
       </div>
     </div>
   </div>

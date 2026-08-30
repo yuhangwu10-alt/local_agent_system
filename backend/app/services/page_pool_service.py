@@ -325,7 +325,7 @@ async def _score_one_batch(
         response = await llm_service.chat([
             {"role": "system", "content": "你是一个中国方志页面评分助手。请只输出 JSON，不要其他文字。"},
             {"role": "user", "content": prompt},
-        ], runtime_config=llm_config)
+        ], runtime_config=llm_config, stage="page_pool")
     parsed = _parse_json(response)
     return parsed.get("评分列表", [])
 
@@ -365,6 +365,7 @@ async def _score_multi_theme_batch(
                 {"role": "user", "content": prompt},
             ],
             runtime_config=llm_config,
+            stage="page_pool",
         )
     parsed = _parse_json(response)
     return parsed.get("评分列表", [])

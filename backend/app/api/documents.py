@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
-from app.api.deps import get_db
+from app.api.deps import get_db, owned_document, owned_project
+from app.services.auth_service import get_current_user
+from app.models.platform import User
 from app.models.task import Task
 from app.models.project import Project, SourceDocument
 from app.schemas.project import DocumentResponse, ScanResponse
@@ -27,12 +29,9 @@ MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
 
 
 @router.post("/scan", response_model=ScanResponse)
-async def scan_documents(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def scan_documents(project_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """扫描 input/ 目录，发现并注册新文件"""
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = await owned_project(project_id, user, db)
 
     input_dir = ensure_dir(get_input_dir(project_id))
     new_files = await scan_input_directory(input_dir, project_id, db)
@@ -43,13 +42,11 @@ async def scan_documents(project_id: uuid.UUID, db: AsyncSession = Depends(get_d
 async def upload_document(
     project_id: uuid.UUID = Form(...),
     file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """HTTP 上传文件"""
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = await owned_project(project_id, user, db)
 
     # 校验文件名
     original_name = file.filename or "unnamed"
@@ -93,6 +90,7 @@ async def upload_document(
 
     doc = SourceDocument(
         project_id=project_id,
+        user_id=user.id,
         file_type=file_type,
         file_path=safe_name,
         file_name=original_name,
@@ -105,7 +103,8 @@ async def upload_document(
 
 
 @router.get("/projects/{project_id}", response_model=list[DocumentResponse])
-async def list_documents(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def list_documents(project_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await owned_project(project_id, user, db)
     result = await db.execute(
         select(SourceDocument)
         .where(SourceDocument.project_id == project_id)
@@ -118,32 +117,34 @@ async def list_documents(project_id: uuid.UUID, db: AsyncSession = Depends(get_d
 async def trigger_ocr(
     document_id: uuid.UUID,
     payload: dict = Body(default_factory=dict),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """触发 OCR 任务"""
-    result = await db.execute(select(SourceDocument).where(SourceDocument.id == document_id))
-    doc = result.scalar_one_or_none()
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Document not found")
+    doc = await owned_document(document_id, user, db)
 
     if doc.status == "ocr_processing":
         raise HTTPException(status_code=400, detail="OCR 正在进行中，请等待完成")
     # ocr_completed 和 ocr_failed 都允许重跑（BE-002 幂等）
+    try:
+        task_id = await task_manager.submit(
+            task_type="ocr",
+            project_id=doc.project_id,
+            user_id=user.id,
+            coro_func=run_ocr_task,
+            quote_id=payload.get("quote_id"),
+            document_id=str(document_id),
+            ocr_batch_size=payload.get("ocr_batch_size"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     await db.execute(
         update(SourceDocument)
         .where(SourceDocument.id == document_id)
         .values(status="ocr_processing")
     )
     await db.commit()
-
-    task_id = await task_manager.submit(
-        task_type="ocr",
-        project_id=doc.project_id,
-        coro_func=run_ocr_task,
-        document_id=str(document_id),
-        ocr_batch_size=payload.get("ocr_batch_size"),
-        ocr_config=payload.get("ocr_config"),
-    )
     await db.execute(
         update(Task)
         .where(Task.id == task_id)
@@ -157,13 +158,11 @@ async def trigger_ocr(
 @router.post("/{document_id}/ocr/cancel")
 async def cancel_document_ocr(
     document_id: uuid.UUID,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """按文档取消正在运行的 OCR/页面导入任务。"""
-    result = await db.execute(select(SourceDocument).where(SourceDocument.id == document_id))
-    doc = result.scalar_one_or_none()
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Document not found")
+    doc = await owned_document(document_id, user, db)
 
     task_rows = await db.execute(
         select(Task)
@@ -209,13 +208,11 @@ async def cancel_document_ocr(
 async def trigger_document_classification(
     document_id: uuid.UUID,
     payload: dict = Body(default_factory=dict),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """触发单个文件的页级分类任务。"""
-    result = await db.execute(select(SourceDocument).where(SourceDocument.id == document_id))
-    doc = result.scalar_one_or_none()
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Document not found")
+    doc = await owned_document(document_id, user, db)
     if doc.status != "ocr_completed":
         raise HTTPException(status_code=400, detail="当前文件还没有完成 OCR/页面导入")
 
@@ -223,27 +220,26 @@ async def trigger_document_classification(
         task_type="classification",
         project_id=doc.project_id,
         coro_func=run_classification,
+        quote_id=payload.get("quote_id"),
         proj_id=str(doc.project_id),
         document_id=str(document_id),
-        llm_config=payload.get("llm_config"),
-        llm_concurrency=payload.get("llm_concurrency", 5),
+        llm_config=None,
+        llm_concurrency=None,
     )
 
     return {"task_id": str(task_id), "status": "submitted"}
 
 
 @router.post("/projects/{project_id}/classify")
-async def trigger_classification(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def trigger_classification(project_id: uuid.UUID, payload: dict = Body(default_factory=dict), user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """触发页级分类任务"""
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if project is None:
-        raise HTTPException(status_code=404, detail="项目不存在")
+    project = await owned_project(project_id, user, db)
 
     task_id = await task_manager.submit(
         task_type="classification",
         project_id=project_id,
         coro_func=run_classification,
+        quote_id=payload.get("quote_id"),
         proj_id=str(project_id),
     )
 
@@ -254,13 +250,11 @@ async def trigger_classification(project_id: uuid.UUID, db: AsyncSession = Depen
 async def extract_document_topics(
     document_id: uuid.UUID,
     payload: dict = Body(default_factory=dict),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """触发批量专题提取任务：分批调 LLM 发现专题，最终合并去重。"""
-    result = await db.execute(select(SourceDocument).where(SourceDocument.id == document_id))
-    doc = result.scalar_one_or_none()
-    if doc is None:
-        raise HTTPException(status_code=404, detail="文档不存在")
+    doc = await owned_document(document_id, user, db)
     if doc.status != "ocr_completed":
         raise HTTPException(status_code=400, detail="请先完成 OCR 处理再进行专题提取")
 
@@ -268,22 +262,20 @@ async def extract_document_topics(
         task_type="topic_extraction",
         project_id=doc.project_id,
         coro_func=run_topic_extraction,
+        quote_id=payload.get("quote_id"),
         proj_id=str(doc.project_id),
         document_id=str(document_id),
-        llm_config=payload.get("llm_config"),
+        llm_config=None,
         batch_size=payload.get("batch_size", 100),
-        llm_concurrency=payload.get("llm_concurrency", 1),
+        llm_concurrency=None,
     )
 
     return {"task_id": str(task_id), "status": "submitted", "message": "批次专题提取任务已提交"}
 
 
 @router.delete("/{document_id}", status_code=204)
-async def delete_document(document_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(SourceDocument).where(SourceDocument.id == document_id))
-    doc = result.scalar_one_or_none()
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Document not found")
+async def delete_document(document_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    doc = await owned_document(document_id, user, db)
 
     doc_path = get_input_dir(doc.project_id) / doc.file_path
     doc_name = doc.file_name
@@ -317,12 +309,9 @@ async def delete_document(document_id: uuid.UUID, db: AsyncSession = Depends(get
 
 
 @router.get("/{document_id}/topics")
-async def get_document_topics(document_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_document_topics(document_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """获取已保存的专题列表"""
-    result = await db.execute(select(SourceDocument).where(SourceDocument.id == document_id))
-    doc = result.scalar_one_or_none()
-    if doc is None:
-        raise HTTPException(status_code=404, detail="文档不存在")
+    doc = await owned_document(document_id, user, db)
     topics = doc.saved_topics or {}
     return {"topics": topics.get("专题列表", []), "updated_at": topics.get("updated_at", "")}
 
@@ -331,13 +320,11 @@ async def get_document_topics(document_id: uuid.UUID, db: AsyncSession = Depends
 async def save_document_topics(
     document_id: uuid.UUID,
     payload: dict = Body(default_factory=dict),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """保存专题列表，支持前端在任意时刻持久化当前专题状态"""
-    result = await db.execute(select(SourceDocument).where(SourceDocument.id == document_id))
-    doc = result.scalar_one_or_none()
-    if doc is None:
-        raise HTTPException(status_code=404, detail="文档不存在")
+    doc = await owned_document(document_id, user, db)
 
     topics = payload.get("专题列表") or payload.get("topics") or []
     from datetime import datetime as _dt

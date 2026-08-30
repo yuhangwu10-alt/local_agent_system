@@ -4,8 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db
+from app.api.deps import get_db, owned_page, owned_document
 from app.models.page import PageContent
+from app.models.platform import User
+from app.services.auth_service import get_current_user
 from app.schemas.page import PageContentResponse, PageContentUpdate
 
 router = APIRouter(prefix="/api", tags=["pages"])
@@ -29,7 +31,7 @@ async def list_pages(
 
 
 @router.patch("/pages/{page_id}", response_model=PageContentResponse)
-async def update_page(page_id: uuid.UUID, data: PageContentUpdate, db: AsyncSession = Depends(get_db)):
+async def update_page(page_id: uuid.UUID, data: PageContentUpdate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(PageContent).where(PageContent.id == page_id))
     page = result.scalar_one_or_none()
     if page is None:

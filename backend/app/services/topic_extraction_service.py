@@ -209,7 +209,7 @@ async def _extract_one_batch(
             response = await llm_service.chat([
                 {"role": "system", "content": "你是一个严谨的中国地方志专题发现助手。请只输出 JSON，不要其他文字。"},
                 {"role": "user", "content": prompt},
-            ], runtime_config=llm_config)
+            ], runtime_config=llm_config, stage="topic_extraction")
     except Exception as e:
         logger.error(f"批次 {batch_no} (第{page_start}-{page_end}页) LLM 调用失败: {e}")
         return {
@@ -261,7 +261,7 @@ async def _consolidate_batches(
         response = await llm_service.chat([
             {"role": "system", "content": "你是一个严谨的中国地方志专题整理助手。请只输出 JSON，不要其他文字。"},
             {"role": "user", "content": prompt},
-        ], runtime_config=llm_config)
+        ], runtime_config=llm_config, stage="topic_extraction")
     except Exception as e:
         logger.error(f"专题合并 LLM 调用失败: {e}")
         # 合并失败时，把各批次的结果直接汇总去重返回

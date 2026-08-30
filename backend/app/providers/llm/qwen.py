@@ -77,7 +77,7 @@ class RuntimeLLMProvider(LLMProvider):
         model = (config.get("model") or "").strip()
 
         # 从同一个厂商注册表推断 base_url
-        base_url = _resolve_base_url(provider)
+        base_url = str(config.get("base_url") or _resolve_base_url(provider))
 
         self.client = AsyncOpenAI(
             base_url=base_url,
@@ -170,3 +170,4 @@ def _format_llm_error(exc: Exception) -> str:
 
 # 保持向后兼容的别名
 QwenLLM = OpenAICompatibleLLM
+

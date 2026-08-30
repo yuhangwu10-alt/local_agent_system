@@ -128,7 +128,7 @@ async def _analyze_one_batch(
             response = await llm_service.chat([
                 {"role": "system", "content": f"你是一个中国方志专题分析助手。请为专题「{topic_name}」分析关键词。只输出 JSON。"},
                 {"role": "user", "content": prompt},
-            ], runtime_config=llm_config)
+            ], runtime_config=llm_config, stage="keyword_completion")
         parsed = _parse_json(response)
         return {
             "batch_no": batch_no,
@@ -173,7 +173,7 @@ async def _consolidate_keywords(
         response = await llm_service.chat([
             {"role": "system", "content": f"你是一个中国方志专题整理助手。请为专题「{topic_name}」整合关键词。只输出 JSON。"},
             {"role": "user", "content": prompt},
-        ], runtime_config=llm_config)
+        ], runtime_config=llm_config, stage="keyword_completion")
         parsed = _parse_json(response)
         return {
             "核心词": parsed.get("核心词", [topic_name]),

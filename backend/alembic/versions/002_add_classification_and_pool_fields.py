@@ -8,7 +8,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import JSONB
+JSONB = sa.JSON
 
 revision: str = "002"
 down_revision: Union[str, None] = "001"
@@ -35,3 +35,4 @@ def downgrade() -> None:
     op.drop_column("page_pool", "命中规则")
     op.drop_column("page_pool", "命中关键词")
     op.drop_column("page_content", "classification")
+

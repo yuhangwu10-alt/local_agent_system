@@ -4,8 +4,10 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db
+from app.api.deps import get_db, owned_theme, owned_narrative
 from app.models.narrative import NarrativeUnit
+from app.models.platform import User
+from app.services.auth_service import get_current_user
 from app.models.page import PagePool
 from app.models.theme import ThemeConfig
 from app.schemas.narrative import NarrativeUnitCreate, NarrativeUnitResponse, NarrativeUnitUpdate
@@ -19,13 +21,11 @@ router = APIRouter(prefix="/api", tags=["narratives"])
 async def generate_narratives(
     theme_id: uuid.UUID,
     payload: dict = Body(default_factory=dict),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """触发叙事单元抽取任务"""
-    result = await db.execute(select(ThemeConfig).where(ThemeConfig.id == theme_id))
-    theme = result.scalar_one_or_none()
-    if theme is None:
-        raise HTTPException(status_code=404, detail="专题不存在")
+    theme = await owned_theme(theme_id, user, db)
 
     # 举一反三: 检查是否有页面池数据
     pool_count = await db.execute(
@@ -40,8 +40,7 @@ async def generate_narratives(
         project_id=theme.project_id,
         coro_func=run_narrative_extraction,
         theme_id=str(theme_id),
-        llm_config=payload.get("llm_config"),
-        llm_concurrency=payload.get("llm_concurrency", 5),
+        quote_id=payload.get("quote_id"),
     )
 
     return {"task_id": str(task_id), "status": "submitted"}
@@ -51,8 +50,10 @@ async def generate_narratives(
 async def list_narratives(
     theme_id: uuid.UUID,
     generation: int | None = Query(None),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await owned_theme(theme_id, user, db)
     query = select(NarrativeUnit).where(NarrativeUnit.theme_id == theme_id)
 
     if generation is not None:
@@ -69,10 +70,11 @@ async def list_narratives(
 async def add_narrative(
     theme_id: uuid.UUID,
     data: NarrativeUnitCreate,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """手动添加叙事单元"""
-    from sqlalchemy import func
+    await owned_theme(theme_id, user, db)
 
     gen_result = await db.execute(
         select(func.max(NarrativeUnit.generation)).where(NarrativeUnit.theme_id == theme_id)
@@ -98,12 +100,10 @@ async def add_narrative(
 async def update_narrative(
     unit_id: uuid.UUID,
     data: NarrativeUnitUpdate,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(NarrativeUnit).where(NarrativeUnit.id == unit_id))
-    unit = result.scalar_one_or_none()
-    if unit is None:
-        raise HTTPException(status_code=404, detail="Narrative unit not found")
+    unit = await owned_narrative(unit_id, user, db)
 
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -115,10 +115,7 @@ async def update_narrative(
 
 
 @router.delete("/narratives/{unit_id}", status_code=204)
-async def delete_narrative(unit_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(NarrativeUnit).where(NarrativeUnit.id == unit_id))
-    unit = result.scalar_one_or_none()
-    if unit is None:
-        raise HTTPException(status_code=404, detail="Narrative unit not found")
+async def delete_narrative(unit_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    unit = await owned_narrative(unit_id, user, db)
     await db.delete(unit)
     await db.commit()

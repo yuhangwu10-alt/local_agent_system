@@ -4,14 +4,16 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import chat, documents, export, narratives, ocr_config, pages, projects, tasks, themes
+from app.api import chat, documents, export, narratives, ocr_config, pages, projects, tasks, themes, platform
 from app.api.pages_pool import router as pages_pool_router
 from app.services.task_manager import task_manager
+from app.database import async_session
+from app.services.auth_service import ensure_admin_user, decode_token
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,6 +22,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting up...")
+    async with async_session() as db:
+        await ensure_admin_user(db)
+        await db.commit()
     await task_manager.recover_on_startup()
     yield
     logger.info("Shutting down...")
@@ -32,6 +37,27 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+@app.exception_handler(ValueError)
+async def handle_value_error(request: Request, exc: ValueError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.middleware("http")
+async def require_api_login(request, call_next):
+    path = request.url.path
+    public = path in {"/health", "/api/app-info"} or path.startswith("/api/auth/") or path == "/docs" or path.startswith("/openapi")
+    if path.startswith("/api/") and not public:
+        authorization = request.headers.get("authorization", "")
+        if not authorization.lower().startswith("bearer "):
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "请先登录"}, status_code=401)
+        try:
+            decode_token(authorization.split(" ", 1)[1].strip())
+        except Exception:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "登录状态已失效，请重新登录"}, status_code=401)
+    return await call_next(request)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -55,6 +81,7 @@ app.include_router(pages_pool_router)
 app.include_router(narratives.router)
 app.include_router(tasks.router)
 app.include_router(export.router)
+app.include_router(platform.router)
 
 
 def frontend_dir() -> Path:
@@ -99,3 +126,8 @@ async def app_info():
 
 if frontend_dir().exists():
     app.mount("/static", StaticFiles(directory=frontend_dir()), name="static")
+
+
+
+
+

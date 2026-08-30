@@ -22,6 +22,19 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "qwen-plus"
 
+    # Platform
+    auth_secret: str = "change-me-in-production"
+    admin_email: str = ""
+    admin_password: str = ""
+    max_active_tasks_per_user: int = 3
+    require_quote_for_ocr: bool = True
+    task_timeout_seconds: int = 7200
+    task_heartbeat_seconds: int = 15
+    task_lease_seconds: int = 60
+    default_page_price: float = 0.10
+    default_row_price: float = 0.01
+    environment: str = "development"
+
     # Storage
     storage_path: str = "/app/storage"
 
@@ -33,3 +46,5 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+

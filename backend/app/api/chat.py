@@ -6,13 +6,15 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db
+from app.api.deps import get_db, owned_project, owned_session, owned_document, owned_theme
 from app.database import async_session
 from app.models.chat import ChatSession, ChatMessage
 from app.models.page import PageContent
 from app.models.project import Project
 from app.schemas.chat import ChatLocalMessageCreate, ChatSessionCreate, ChatSessionResponse, ChatMessageCreate, ChatMessageResponse
 from app.services import llm_service
+from app.models.platform import User
+from app.services.auth_service import get_current_user
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -208,12 +210,14 @@ async def _build_document_context(db: AsyncSession, project_id: uuid.UUID, docum
 async def create_session(
     project_id: uuid.UUID,
     data: ChatSessionCreate,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = await owned_project(project_id, user, db)
+    if data.theme_id is not None:
+        theme = await owned_theme(data.theme_id, user, db)
+        if theme.project_id != project.id:
+            raise HTTPException(status_code=400, detail="专题不属于当前项目")
 
     session = ChatSession(
         project_id=project_id,
@@ -227,7 +231,8 @@ async def create_session(
 
 
 @router.get("/projects/{project_id}/chat/sessions", response_model=list[ChatSessionResponse])
-async def list_sessions(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def list_sessions(project_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await owned_project(project_id, user, db)
     result = await db.execute(
         select(ChatSession)
         .where(ChatSession.project_id == project_id)
@@ -237,20 +242,14 @@ async def list_sessions(project_id: uuid.UUID, db: AsyncSession = Depends(get_db
 
 
 @router.get("/chat/sessions/{session_id}", response_model=ChatSessionResponse)
-async def get_session(session_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(ChatSession).where(ChatSession.id == session_id))
-    session = result.scalar_one_or_none()
-    if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+async def get_session(session_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    session = await owned_session(session_id, user, db)
     return session
 
 
 @router.delete("/chat/sessions/{session_id}")
-async def delete_session(session_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(ChatSession).where(ChatSession.id == session_id))
-    session = result.scalar_one_or_none()
-    if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+async def delete_session(session_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    session = await owned_session(session_id, user, db)
     await db.delete(session)
     await db.commit()
     return {"status": "deleted", "session_id": str(session_id)}
@@ -260,13 +259,11 @@ async def delete_session(session_id: uuid.UUID, db: AsyncSession = Depends(get_d
 async def append_local_message(
     session_id: uuid.UUID,
     data: ChatLocalMessageCreate,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """保存前端已经生成的本地消息，不触发 LLM。用于把批量专题提取结果写入对话历史。"""
-    result = await db.execute(select(ChatSession).where(ChatSession.id == session_id))
-    session = result.scalar_one_or_none()
-    if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    await owned_session(session_id, user, db)
 
     message = ChatMessage(
         session_id=session_id,
@@ -284,14 +281,16 @@ async def append_local_message(
 async def send_message(
     session_id: uuid.UUID,
     data: ChatMessageCreate,
+    user: User = Depends(get_current_user),
 ):
     """发送消息，返回 SSE 流式响应。DB 会话在流开始前手动关闭，避免长时间占用连接池。"""
     # 所有 DB 操作在独立的短生命周期 session 内完成
     async with async_session() as db:
-        result = await db.execute(select(ChatSession).where(ChatSession.id == session_id))
-        session = result.scalar_one_or_none()
-        if session is None:
-            raise HTTPException(status_code=404, detail="Session not found")
+        session = await owned_session(session_id, user, db)
+        if data.document_id is not None:
+            document = await owned_document(data.document_id, user, db)
+            if document.project_id != session.project_id:
+                raise HTTPException(status_code=400, detail="文档不属于当前项目")
 
         # 保存用户消息
         user_msg = ChatMessage(session_id=session_id, role="user", content=data.content)
@@ -343,7 +342,7 @@ async def send_message(
     async def event_stream():
         full_response = []
         try:
-            async for chunk in llm_service.chat_stream(llm_messages, runtime_config=data.llm_config):
+            async for chunk in llm_service.chat_stream(llm_messages, runtime_config=None, stage="chat"):
                 full_response.append(chunk)
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
         except Exception as e:
@@ -374,6 +373,7 @@ async def send_message(
 async def confirm_topics_from_chat(
     session_id: uuid.UUID,
     payload: dict = Body(default_factory=dict),
+    user: User = Depends(get_current_user),
 ):
     """从聊天对话中提取用户最终确认的专题列表。由前端在检测到用户满意意图后调用。"""
     async with async_session() as db:
@@ -445,7 +445,7 @@ async def confirm_topics_from_chat(
         response = await llm_service.chat([
             {"role": "system", "content": "你是一个严谨的学术专题整理助手。请只输出 JSON，不要其他文字。"},
             {"role": "user", "content": confirm_prompt},
-        ], runtime_config=payload.get("llm_config"))
+        ], runtime_config=None, stage="chat")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"LLM 调用失败：{e}")
 
@@ -475,8 +475,10 @@ async def list_messages(
     session_id: uuid.UUID,
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await owned_session(session_id, user, db)
     result = await db.execute(
         select(ChatMessage)
         .where(ChatMessage.session_id == session_id)
