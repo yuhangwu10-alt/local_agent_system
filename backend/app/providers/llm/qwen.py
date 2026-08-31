@@ -78,16 +78,17 @@ class RuntimeLLMProvider(LLMProvider):
 
         # 从同一个厂商注册表推断 base_url
         base_url = str(config.get("base_url") or _resolve_base_url(provider))
+        timeout = max(5.0, float(config.get("timeout_seconds") or 60))
 
         self.client = AsyncOpenAI(
             base_url=base_url,
             api_key=api_key,
-            timeout=60.0,
+            timeout=timeout,
             max_retries=0,
         )
         self.provider = provider
         self.model = model
-        self.max_retries = 2
+        self.max_retries = max(0, min(5, int(config.get("retries") or 0)))
 
     async def chat(self, messages: list[dict], stream: bool = False):
         if stream:

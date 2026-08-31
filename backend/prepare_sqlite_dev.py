@@ -38,6 +38,10 @@ def main() -> None:
                 "worker_id": "VARCHAR(120)",
                 "lease_expires_at": "DATETIME",
             },
+            "billing_quote": {
+                "document_ids": "JSON",
+                "expires_at": "DATETIME",
+            },
         }
         for table, additions in table_additions.items():
             if table not in tables:
@@ -46,6 +50,11 @@ def main() -> None:
             for name, column_type in additions.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {column_type}")
+        if "billing_quote" in tables:
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_billing_quote_task_id "
+                "ON billing_quote(task_id) WHERE task_id IS NOT NULL"
+            )
         db.commit()
 
 

@@ -175,8 +175,10 @@ async def cancel_document_ocr(
     )
     matched_task = None
     for task in task_rows.scalars().all():
+        task_payload = task.payload if isinstance(task.payload, dict) else {}
         result_meta = task.result if isinstance(task.result, dict) else {}
-        if result_meta.get("document_id") == str(document_id):
+        task_document_id = task_payload.get("document_id") or result_meta.get("document_id")
+        if str(task_document_id or "") == str(document_id):
             matched_task = task
             break
 

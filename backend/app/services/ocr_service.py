@@ -102,6 +102,12 @@ async def run_ocr_task(task_id: UUID, document_id: str, **kwargs):
         # legacy runtime field is intentionally ignored for security.
         runtime_config, ocr_semaphore = await get_platform_model_config("ocr")
 
+        if doc_info.file_type == "pdf" and runtime_config is None:
+            configured_key = (settings.ocr_api_key or "").strip()
+            configured_url = (settings.ocr_base_url or "").lower()
+            if not configured_key or configured_key == "mock-key" or "mock" in configured_url or "host.docker.internal" in configured_url:
+                raise RuntimeError("未配置真实视觉 OCR 模型，请让管理员配置带有 ocr 阶段的视觉模型通道")
+
         recovered = bool(kwargs.get("recovered"))
 
         if doc_info.file_type == "pdf":

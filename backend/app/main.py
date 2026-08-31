@@ -14,6 +14,7 @@ from app.api.pages_pool import router as pages_pool_router
 from app.services.task_manager import task_manager
 from app.database import async_session
 from app.services.auth_service import ensure_admin_user, decode_token
+from app.config import settings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,6 +23,10 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting up...")
+    if settings.database_url.startswith("sqlite"):
+        # Keep legacy local SQLite files usable after model/schema additions.
+        from prepare_sqlite_dev import main as prepare_sqlite_dev
+        prepare_sqlite_dev()
     async with async_session() as db:
         await ensure_admin_user(db)
         await db.commit()

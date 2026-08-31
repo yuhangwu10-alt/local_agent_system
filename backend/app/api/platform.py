@@ -1,17 +1,20 @@
 """Platform authentication, wallet and model settings endpoints."""
 import hashlib
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 import fitz
 
 from app.api.deps import get_db
-from app.models.platform import BillingQuote, LedgerEntry, ModelProfile, RedeemCode, User
+from app.config import settings
+from app.models.platform import BillingQuote, LedgerEntry, ModelProfile, RedeemCode, User, Wallet
 from app.models.project import Project, SourceDocument
 from app.utils.file_storage import get_input_dir, safe_join
 from app.services.billing_service import count_billable_excel_rows, money
@@ -21,7 +24,7 @@ router = APIRouter(prefix="/api", tags=["platform"])
 
 
 class RegisterRequest(BaseModel):
-    email: str
+    email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=8)
     display_name: str = Field(min_length=1, max_length=120)
 
@@ -50,18 +53,46 @@ class ModelProfileCreate(BaseModel):
     is_default: bool = False
 
 
+class ModelProfilePatch(BaseModel):
+    name: str | None = None
+    provider: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    model: str | None = None
+    stages: list[str] | None = None
+    max_concurrency: int | None = Field(default=None, ge=1, le=100)
+    timeout_seconds: int | None = Field(default=None, ge=5, le=600)
+    retries: int | None = Field(default=None, ge=0, le=5)
+    priority: int | None = Field(default=None, ge=0, le=1000)
+    enabled: bool | None = None
+    is_default: bool | None = None
+
+
+class BalanceAdjustment(BaseModel):
+    amount: Decimal
+    reason: str = Field(default="管理员调账", max_length=200)
+
+
 def _pdf_page_count(path):
     with fitz.open(str(path)) as pdf:
         return pdf.page_count
 
 
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
 @router.post("/auth/register")
 async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
     email = data.email.strip().lower()
+    if not _EMAIL_RE.fullmatch(email):
+        raise HTTPException(status_code=400, detail="邮箱格式不正确")
+    display_name = data.display_name.strip()
+    if not display_name:
+        raise HTTPException(status_code=400, detail="显示名称不能为空")
     existing = await db.execute(select(User).where(User.email == email))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="邮箱已注册")
-    user = User(email=email, password_hash=hash_password(data.password), display_name=data.display_name.strip())
+    user = User(email=email, password_hash=hash_password(data.password), display_name=display_name)
     db.add(user)
     await db.flush()
     await ensure_wallet(db, user.id)
@@ -92,18 +123,31 @@ async def redeem(data: RedeemRequest, user: User = Depends(get_current_user), db
     if len(normalized) < 8:
         raise HTTPException(status_code=400, detail="兑换码格式不正确")
     code_hash = hashlib.sha256(normalized.encode()).hexdigest()
-    result = await db.execute(select(RedeemCode).where(RedeemCode.code_hash == code_hash).with_for_update())
-    code = result.scalar_one_or_none()
     now = datetime.now(timezone.utc)
-    if code is None or code.redeemed_by is not None or (code.expires_at and code.expires_at < now):
+    claimed = await db.execute(
+        update(RedeemCode)
+        .where(
+            RedeemCode.code_hash == code_hash,
+            RedeemCode.redeemed_by.is_(None),
+            or_(RedeemCode.expires_at.is_(None), RedeemCode.expires_at >= now),
+        )
+        .values(redeemed_by=user.id, redeemed_at=now)
+    )
+    if claimed.rowcount != 1:
+        await db.rollback()
         raise HTTPException(status_code=400, detail="兑换码无效、已使用或已过期")
-    wallet = await ensure_wallet(db, user.id)
-    wallet.balance += code.amount
-    code.redeemed_by = user.id
-    code.redeemed_at = now
-    db.add(LedgerEntry(user_id=user.id, amount=code.amount, balance_after=wallet.balance, entry_type="redeem", reference_id=str(code.id), description=f"兑换码 {code.code_hint}"))
+    code = await db.scalar(select(RedeemCode).where(RedeemCode.code_hash == code_hash))
+    if code is None:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="兑换码无效")
+    wallet = await db.scalar(select(Wallet).where(Wallet.user_id == user.id).with_for_update())
+    if wallet is None:
+        wallet = await ensure_wallet(db, user.id)
+    credited = money(code.amount)
+    wallet.balance = money(Decimal(str(wallet.balance or 0)) + credited)
+    db.add(LedgerEntry(user_id=user.id, amount=credited, balance_after=wallet.balance, entry_type="redeem", reference_id=str(code.id), description=f"兑换码 {code.code_hint}"))
     await db.commit()
-    return {"balance": wallet.balance, "credited": code.amount}
+    return {"balance": wallet.balance, "credited": credited}
 
 
 @router.get("/wallet/ledger")
@@ -130,19 +174,42 @@ async def create_model(data: ModelProfileCreate, _: User = Depends(require_admin
 
 
 @router.patch("/admin/models/{model_id}")
-async def update_model(model_id: uuid.UUID, data: ModelProfileCreate, _: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def update_model(model_id: uuid.UUID, data: ModelProfilePatch, _: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     row = await db.get(ModelProfile, model_id)
     if row is None:
         raise HTTPException(status_code=404, detail="模型配置不存在")
-    if data.is_default:
+    if data.is_default is True:
         await db.execute(update(ModelProfile).values(is_default=False))
-    values = data.model_dump()
-    if not values["api_key"]:
-        values["api_key"] = row.api_key
+    values = {key: value for key, value in data.model_dump().items() if value is not None}
+    if "api_key" in values and not values["api_key"]:
+        values.pop("api_key")
     for key, value in values.items():
         setattr(row, key, value)
     await db.commit()
     return {"id": str(row.id), "name": row.name}
+
+
+@router.delete("/admin/models/{model_id}", status_code=204)
+async def delete_model(model_id: uuid.UUID, _: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    row = await db.get(ModelProfile, model_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+    await db.delete(row)
+    await db.commit()
+
+
+@router.post("/admin/models/{model_id}/test")
+async def test_model(model_id: uuid.UUID, _: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    row = await db.get(ModelProfile, model_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+    from app.providers.llm.qwen import RuntimeLLMProvider
+    try:
+        provider = RuntimeLLMProvider({"provider": row.provider, "base_url": row.base_url, "api_key": row.api_key, "model": row.model, "timeout_seconds": min(row.timeout_seconds, 60), "retries": 0})
+        result = await provider.chat([{"role": "user", "content": "只回复 OK"}])
+        return {"ok": True, "preview": str(result or "")[:120]}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300]}
 
 
 @router.post("/admin/redeem-codes")
@@ -204,6 +271,62 @@ async def list_redeem_codes(_: User = Depends(require_admin), db: AsyncSession =
     return [{"id": str(row.id), "code_hint": row.code_hint, "amount": row.amount, "batch_name": row.batch_name,
              "redeemed": row.redeemed_by is not None, "redeemed_at": row.redeemed_at, "expires_at": row.expires_at,
              "created_at": row.created_at} for row in result.scalars()]
+
+
+@router.post("/admin/redeem-codes/{code_id}/revoke")
+async def revoke_redeem_code(code_id: uuid.UUID, _: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    row = await db.get(RedeemCode, code_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="兑换码不存在")
+    if row.redeemed_by is not None:
+        raise HTTPException(status_code=400, detail="已兑换的兑换码不能撤销")
+    row.expires_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"id": str(row.id), "revoked": True}
+
+
+@router.post("/admin/users/{user_id}/balance")
+async def adjust_balance(user_id: uuid.UUID, data: BalanceAdjustment, _: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    if not data.amount:
+        raise HTTPException(status_code=400, detail="调账金额不能为 0")
+    target = await db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    wallet = await ensure_wallet(db, user_id)
+    adjustment = money(data.amount)
+    next_balance = money(Decimal(str(wallet.balance or 0)) + adjustment)
+    if next_balance < 0:
+        raise HTTPException(status_code=400, detail="余额不能为负数")
+    wallet.balance = next_balance
+    db.add(LedgerEntry(user_id=user_id, amount=adjustment, balance_after=next_balance, entry_type="admin_adjustment", description=data.reason.strip() or "管理员调账"))
+    await db.commit()
+    return {"user_id": str(user_id), "balance": wallet.balance}
+
+
+@router.post("/admin/tasks/{task_id}/cancel")
+async def admin_cancel_task(task_id: uuid.UUID, _: User = Depends(require_admin)):
+    from app.services.task_manager import task_manager
+
+    try:
+        cancelled = await task_manager.cancel(task_id, reason="管理员取消")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not cancelled:
+        raise HTTPException(status_code=400, detail="任务不存在或当前状态不可取消")
+    return {"id": str(task_id), "status": "cancelled"}
+
+
+@router.post("/admin/tasks/{task_id}/retry")
+async def admin_retry_task(task_id: uuid.UUID, _: User = Depends(require_admin)):
+    from app.services.task_manager import task_manager
+
+    try:
+        retried = await task_manager.retry(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not retried:
+        raise HTTPException(status_code=400, detail="任务不存在或当前状态不可重试")
+    return {"id": str(task_id), "status": "pending"}
 
 class QuoteRequest(BaseModel):
     project_id: uuid.UUID

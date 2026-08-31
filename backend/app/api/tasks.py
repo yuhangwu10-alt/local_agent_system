@@ -61,7 +61,8 @@ async def cancel_task(task_id: uuid.UUID, user: User = Depends(get_current_user)
     """取消任务"""
     async with async_session() as db:
         task = await owned_task(task_id, user, db)
-        document_id = (task.result or {}).get("document_id") if isinstance(task.result, dict) else None
+        payload = task.payload if isinstance(task.payload, dict) else {}
+        document_id = payload.get("document_id") or ((task.result or {}).get("document_id") if isinstance(task.result, dict) else None)
 
     success = await task_manager.cancel(task_id)
     if not success:

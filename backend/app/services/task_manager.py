@@ -321,22 +321,49 @@ class TaskManager:
                 "updated_at": task.updated_at.isoformat(),
             }
 
-    async def cancel(self, task_id: uuid.UUID) -> bool:
-        """取消任务（只发送取消信号，状态更新由 _wrapped 处理）"""
-        atask = self._tasks.get(task_id)
-        if atask and not atask.done():
-            atask.cancel()
-            return True
+    async def cancel(self, task_id: uuid.UUID, reason: str = "用户取消") -> bool:
+        """先持久化取消和退款，再中断当前进程中的执行任务。"""
+        should_interrupt = False
         async with async_session() as db:
-            task = await db.get(Task, task_id)
+            task = await db.scalar(select(Task).where(Task.id == task_id).with_for_update())
             if task is None or task.status not in {"pending", "running"}:
                 return False
-            if task.status == "pending" and task.billing_quote_id and task.charge_status == "frozen":
+            if task.billing_quote_id and task.charge_status == "frozen":
                 await refund_quote(db, task.billing_quote_id, task.user_id, "任务取消退款")
                 task.charge_status = "refunded"
             task.status = "cancelled"
-            task.error = "用户取消"
+            task.error = reason
+            task.worker_id = None
+            task.lease_expires_at = None
             await db.commit()
+            atask = self._tasks.get(task_id)
+            should_interrupt = atask is not None and not atask.done()
+        if should_interrupt:
+            atask.cancel()
+        return True
+
+    async def retry(self, task_id: uuid.UUID, max_attempts: int = 3) -> bool:
+        """重新排队非计费失败任务；计费任务必须重新报价，避免绕过扣费。"""
+        async with async_session() as db:
+            task = await db.scalar(select(Task).where(Task.id == task_id).with_for_update())
+            if task is None or task.status != "failed":
+                return False
+            if task.charge_status != "none":
+                raise ValueError("已计费或已退款的任务不能直接重试，请重新报价")
+            if task.attempt_count >= max_attempts:
+                raise ValueError("任务重试次数已达上限")
+            coro_func = self._task_registry().get(task.task_type)
+            if coro_func is None or not task.payload:
+                raise ValueError("任务缺少可恢复的执行参数")
+            task.status = "pending"
+            task.progress = 0
+            task.error = None
+            task.result = None
+            task.worker_id = None
+            task.lease_expires_at = None
+            await db.commit()
+            payload = dict(task.payload)
+        self._start_task(task.id, task.task_type, coro_func, **payload)
         return True
 
     async def recover_on_startup(self):

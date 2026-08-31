@@ -115,11 +115,14 @@ async function loadWorkspaceShell() {
     sidebar.className = "app-sidebar";
     sidebar.innerHTML = `<div class="sidebar-brand"><span class="sidebar-mark">志</span><span>方志工作台</span></div><button class="new-workspace-btn" type="button">＋ 新建研究任务</button><div class="sidebar-label">研究任务</div><div class="workspace-list"></div><div class="sidebar-footer"><button class="wallet-chip" type="button" title="兑换余额"><span>余额</span> <strong class="wallet-balance">--</strong></button><button class="logout-btn" type="button">退出登录</button></div>`;
     document.querySelector(".app")?.prepend(sidebar);
+    ensureWorkspaceHeaderControls();
     sidebar.querySelector(".new-workspace-btn").addEventListener("click", async () => {
       const name = window.prompt("研究任务名称", "新的地方志研究任务");
       if (!name?.trim()) return;
       state.project = await api("/api/projects", { method: "POST", body: JSON.stringify({ name: name.trim() }) });
       state.workspaces.unshift(state.project);
+      resetWorkspaceState();
+      loadProjectPersistedState(state.project.id);
       renderWorkspaceList();
       await refreshDocuments();
     });
@@ -131,6 +134,165 @@ async function loadWorkspaceShell() {
   state.user = me;
   const balance = document.querySelector(".wallet-balance");
   if (balance) balance.textContent = Number(me.balance || 0).toFixed(2);
+  if (me.role === "admin") ensureAdminEntry(document.querySelector(".app-sidebar"));
+}
+
+function ensureWorkspaceHeaderControls() {
+  const topbar = document.querySelector(".topbar");
+  if (!topbar || topbar.querySelector(".sidebar-toggle")) return;
+  const toggle = document.createElement("button");
+  toggle.className = "sidebar-toggle";
+  toggle.type = "button";
+  toggle.title = "打开研究任务列表";
+  toggle.setAttribute("aria-label", "打开研究任务列表");
+  toggle.textContent = "☰";
+  toggle.addEventListener("click", () => document.body.classList.toggle("sidebar-open"));
+  topbar.prepend(toggle);
+}
+
+function updateWorkspaceHeading() {
+  const title = document.querySelector(".brand h1");
+  const description = document.querySelector(".brand p");
+  if (title) title.textContent = state.project?.name || "方志智能研究工作台";
+  if (description) description.textContent = state.project ? "文档、专题、对话与提取结果均保存在当前研究任务中" : "创建研究任务后开始整理地方志资料";
+}
+
+function ensureAdminEntry(sidebar) {
+  if (!sidebar) return;
+  if (sidebar.querySelector(".admin-entry")) return;
+  const footer = sidebar.querySelector(".sidebar-footer");
+  const button = document.createElement("button");
+  button.className = "admin-entry";
+  button.type = "button";
+  button.textContent = "管理后台";
+  button.title = "打开管理后台";
+  button.addEventListener("click", openAdminPanel);
+  footer?.prepend(button);
+}
+
+function closeAdminPanel() {
+  document.querySelector(".admin-screen")?.remove();
+}
+
+async function openAdminPanel() {
+  if (state.user?.role !== "admin") return;
+  if (document.querySelector(".admin-screen")) return;
+  const screen = document.createElement("div");
+  screen.className = "admin-screen";
+  screen.innerHTML = `
+    <div class="admin-window">
+      <header class="admin-header"><div><span class="admin-kicker">PLATFORM CONTROL</span><h2>管理后台</h2></div><button class="admin-close" type="button" aria-label="关闭">×</button></header>
+      <nav class="admin-tabs" aria-label="管理后台模块">
+        <button class="active" data-admin-section="models" type="button">模型通道</button>
+        <button data-admin-section="users" type="button">用户与余额</button>
+        <button data-admin-section="codes" type="button">兑换码</button>
+        <button data-admin-section="tasks" type="button">任务监控</button>
+      </nav>
+      <main class="admin-content"><div class="admin-loading">正在加载...</div></main>
+    </div>`;
+  document.body.appendChild(screen);
+  screen.querySelector(".admin-close").addEventListener("click", closeAdminPanel);
+  screen.querySelectorAll("[data-admin-section]").forEach((button) => button.addEventListener("click", () => {
+    screen.querySelectorAll("[data-admin-section]").forEach((item) => item.classList.toggle("active", item === button));
+    loadAdminSection(button.dataset.adminSection);
+  }));
+  await loadAdminSection("models");
+}
+
+function adminContent() {
+  return document.querySelector(".admin-screen .admin-content");
+}
+
+async function loadAdminSection(section) {
+  const content = adminContent();
+  if (!content) return;
+  content.innerHTML = '<div class="admin-loading">正在加载...</div>';
+  try {
+    if (section === "models") return renderAdminModels(await api("/api/admin/models"));
+    if (section === "users") return renderAdminUsers(await api("/api/admin/users"));
+    if (section === "codes") return renderAdminCodes(await api("/api/admin/redeem-codes"));
+    if (section === "tasks") return renderAdminTasks(await api("/api/admin/tasks"));
+  } catch (error) {
+    content.innerHTML = `<div class="admin-error">加载失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderAdminModels(models) {
+  const content = adminContent();
+  content.innerHTML = `<div class="admin-section-head"><div><h3>模型通道</h3><p>API Key 只保存在服务器，不会回显。</p></div><button class="admin-primary" data-admin-action="new-model" type="button">新增通道</button></div>
+    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>名称</th><th>Provider / 模型</th><th>阶段</th><th>并发</th><th>状态</th><th>操作</th></tr></thead><tbody>${models.length ? models.map((model) => `<tr>
+      <td><strong>${escapeHtml(model.name)}</strong><small>${model.api_key_set ? "密钥已配置" : "未配置密钥"}</small></td>
+      <td>${escapeHtml(model.provider)}<small>${escapeHtml(model.model)}</small></td>
+      <td>${escapeHtml((model.stages || []).join("、") || "默认")}</td>
+      <td>${model.max_concurrency}<small>${model.timeout_seconds}s / 重试 ${model.retries}</small></td>
+      <td><span class="admin-status ${model.enabled ? "on" : "off"}">${model.enabled ? "启用" : "停用"}${model.is_default ? " · 默认" : ""}</span></td>
+      <td class="admin-actions"><button data-admin-action="test-model" data-id="${model.id}" type="button">测试</button><button data-admin-action="edit-model" data-model='${escapeHtml(JSON.stringify(model))}' type="button">编辑</button><button data-admin-action="delete-model" data-id="${model.id}" type="button">删除</button></td>
+    </tr>`).join("") : '<tr><td colspan="6" class="admin-empty">暂无模型通道</td></tr>'}</tbody></table></div>`;
+  content.querySelectorAll("[data-admin-action]").forEach((button) => button.addEventListener("click", () => handleAdminAction(button)));
+}
+
+function renderAdminUsers(users) {
+  const content = adminContent();
+  content.innerHTML = `<div class="admin-section-head"><div><h3>用户与余额</h3><p>余额调整会记录到账务流水。</p></div></div><div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>用户</th><th>角色</th><th>余额</th><th>冻结</th><th>状态</th><th>操作</th></tr></thead><tbody>${users.map((user) => `<tr>
+    <td><strong>${escapeHtml(user.display_name)}</strong><small>${escapeHtml(user.email)}</small></td><td>${escapeHtml(user.role)}</td><td>${Number(user.balance || 0).toFixed(2)}</td><td>${Number(user.frozen || 0).toFixed(2)}</td>
+    <td><span class="admin-status ${user.is_active ? "on" : "off"}">${user.is_active ? "正常" : "停用"}</span></td><td class="admin-actions"><button data-admin-action="adjust-balance" data-id="${user.id}" type="button">调账</button><button data-admin-action="toggle-user" data-id="${user.id}" data-active="${user.is_active}" type="button">${user.is_active ? "停用" : "启用"}</button></td>
+  </tr>`).join("") || '<tr><td colspan="6" class="admin-empty">暂无用户</td></tr>'}</tbody></table></div>`;
+  content.querySelectorAll("[data-admin-action]").forEach((button) => button.addEventListener("click", () => handleAdminAction(button)));
+}
+
+function renderAdminCodes(codes) {
+  const content = adminContent();
+  content.innerHTML = `<div class="admin-section-head"><div><h3>兑换码</h3><p>新生成的明文兑换码只在生成时展示一次。</p></div><button class="admin-primary" data-admin-action="new-codes" type="button">批量生成</button></div><div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>尾号</th><th>面值</th><th>批次</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${codes.map((code) => `<tr><td>•••• ${escapeHtml(code.code_hint)}</td><td>${Number(code.amount || 0).toFixed(2)}</td><td>${escapeHtml(code.batch_name || "-")}</td><td>${code.redeemed ? "已兑换" : (code.expires_at && new Date(code.expires_at) <= new Date() ? "已失效" : "未使用")}</td><td>${formatAdminDate(code.created_at)}</td><td>${!code.redeemed ? `<button data-admin-action="revoke-code" data-id="${code.id}" type="button">撤销</button>` : "-"}</td></tr>`).join("") || '<tr><td colspan="6" class="admin-empty">暂无兑换码</td></tr>'}</tbody></table></div>`;
+  content.querySelectorAll("[data-admin-action]").forEach((button) => button.addEventListener("click", () => handleAdminAction(button)));
+}
+
+function renderAdminTasks(tasks) {
+  const content = adminContent();
+  content.innerHTML = `<div class="admin-section-head"><div><h3>任务监控</h3><p>失败任务只有在未计费时允许直接重试；已退款任务需重新报价。</p></div><button data-admin-action="refresh-admin" type="button">刷新</button></div><div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>类型</th><th>状态</th><th>进度</th><th>计费</th><th>尝试</th><th>错误</th><th>操作</th></tr></thead><tbody>${tasks.map((task) => `<tr><td>${escapeHtml(task.task_type)}</td><td><span class="admin-status ${task.status === "completed" ? "on" : task.status === "failed" ? "off" : "pending"}">${escapeHtml(task.status)}</span></td><td>${task.progress}%</td><td>${escapeHtml(task.charge_status)}</td><td>${task.attempt_count}</td><td class="admin-error-cell">${escapeHtml(task.error || "-")}</td><td class="admin-actions">${["pending", "running"].includes(task.status) ? `<button data-admin-action="cancel-task" data-id="${task.id}" type="button">取消</button>` : ""}${task.status === "failed" && task.charge_status === "none" ? `<button data-admin-action="retry-task" data-id="${task.id}" type="button">重试</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="7" class="admin-empty">暂无任务</td></tr>'}</tbody></table></div>`;
+  content.querySelectorAll("[data-admin-action]").forEach((button) => button.addEventListener("click", () => handleAdminAction(button)));
+}
+
+function formatAdminDate(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
+}
+
+async function handleAdminAction(button) {
+  const action = button.dataset.adminAction;
+  try {
+    if (action === "new-model" || action === "edit-model") return adminModelForm(action === "edit-model" ? JSON.parse(button.dataset.model) : null);
+    if (action === "delete-model" && window.confirm("确定删除这个模型通道吗？")) await api(`/api/admin/models/${button.dataset.id}`, { method: "DELETE" });
+    if (action === "test-model") { const result = await api(`/api/admin/models/${button.dataset.id}/test`, { method: "POST" }); window.alert(result.ok ? `连接成功：${result.preview || "OK"}` : `连接失败：${result.error || "未知错误"}`); return; }
+    if (action === "new-codes") { const amount = Number(window.prompt("每个兑换码面值", "10")); const count = Number(window.prompt("生成数量", "10")); if (amount > 0 && count > 0) { const result = await api(`/api/admin/redeem-codes?amount=${encodeURIComponent(amount)}&count=${encodeURIComponent(count)}`, { method: "POST" }); window.alert(`已生成 ${result.count} 个兑换码：\n${result.codes.join("\n")}`); } }
+    if (action === "revoke-code" && window.confirm("确定撤销这个未使用兑换码吗？")) await api(`/api/admin/redeem-codes/${button.dataset.id}/revoke`, { method: "POST" });
+    if (action === "adjust-balance") { const amount = Number(window.prompt("输入调整金额，可为负数", "10")); if (Number.isFinite(amount) && amount !== 0) await api(`/api/admin/users/${button.dataset.id}/balance`, { method: "POST", body: JSON.stringify({ amount, reason: "管理员后台调账" }) }); }
+    if (action === "toggle-user") await api(`/api/admin/users/${button.dataset.id}`, { method: "PATCH", body: JSON.stringify({ is_active: button.dataset.active !== "true" }) });
+    if (action === "cancel-task") { if (!window.confirm("确定取消这个任务吗？冻结余额会退款。")) return; await api(`/api/admin/tasks/${button.dataset.id}/cancel`, { method: "POST" }); }
+    if (action === "retry-task") await api(`/api/admin/tasks/${button.dataset.id}/retry`, { method: "POST" });
+    if (action === "refresh-admin") return loadAdminSection("tasks");
+    const active = document.querySelector(".admin-tabs button.active")?.dataset.adminSection || "models";
+    await loadAdminSection(active);
+  } catch (error) { window.alert(`操作失败：${error.message}`); }
+}
+
+function adminModelForm(model) {
+  const content = adminContent();
+  const isEdit = Boolean(model);
+  content.innerHTML = `<div class="admin-section-head"><div><h3>${isEdit ? "编辑模型通道" : "新增模型通道"}</h3><p>密钥留空表示保留已有密钥；普通用户不会看到这些字段。</p></div><button data-admin-action="back-models" type="button">返回列表</button></div><form class="admin-form" id="adminModelForm">
+    <label>名称<input name="name" required value="${escapeHtml(model?.name || "")}"></label><label>Provider<input name="provider" required value="${escapeHtml(model?.provider || "qwen")}"></label><label>Base URL<input name="base_url" required value="${escapeHtml(model?.base_url || "")}"></label><label>API Key<input name="api_key" type="password" placeholder="${model?.api_key_set ? "已配置，留空保持不变" : "输入服务器密钥"}"></label><label>模型<input name="model" required value="${escapeHtml(model?.model || "")}"></label><label>Stages<input name="stages" value="${escapeHtml((model?.stages || []).join(","))}" placeholder="ocr,narrative"></label><label>并发<input name="max_concurrency" type="number" min="1" max="100" value="${model?.max_concurrency || 5}"></label><label>超时秒数<input name="timeout_seconds" type="number" min="5" max="600" value="${model?.timeout_seconds || 60}"></label><label>重试次数<input name="retries" type="number" min="0" max="5" value="${model?.retries ?? 2}"></label><label>优先级<input name="priority" type="number" min="0" value="${model?.priority ?? 100}"></label><label class="admin-check"><input name="enabled" type="checkbox" ${model?.enabled !== false ? "checked" : ""}>启用</label><label class="admin-check"><input name="is_default" type="checkbox" ${model?.is_default ? "checked" : ""}>设为默认</label><button class="admin-primary" type="submit">保存</button></form>`;
+  content.querySelector("[data-admin-action='back-models']").addEventListener("click", () => loadAdminSection("models"));
+  content.querySelector("form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const payload = Object.fromEntries(form.entries());
+    payload.stages = String(payload.stages || "").split(",").map((item) => item.trim()).filter(Boolean);
+    for (const key of ["max_concurrency", "timeout_seconds", "retries", "priority"]) payload[key] = Number(payload[key]);
+    payload.enabled = form.get("enabled") === "on"; payload.is_default = form.get("is_default") === "on";
+    if (!payload.api_key) delete payload.api_key;
+    await api(isEdit ? `/api/admin/models/${model.id}` : "/api/admin/models", { method: isEdit ? "PATCH" : "POST", body: JSON.stringify(payload) });
+    await loadAdminSection("models");
+  });
 }
 
 async function refreshWallet() {
@@ -158,16 +320,19 @@ function renderWorkspaceList() {
   if (!list) return;
   list.innerHTML = state.workspaces.length ? state.workspaces.map((item) => `<button class="workspace-item ${state.project?.id === item.id ? "active" : ""}" data-project-id="${item.id}" type="button"><span class="workspace-dot"></span><span class="workspace-name">${escapeHtml(item.name)}</span></button>`).join("") : `<div class="workspace-empty">还没有研究任务</div>`;
   list.querySelectorAll("[data-project-id]").forEach((button) => button.addEventListener("click", () => switchWorkspace(button.dataset.projectId)));
+  updateWorkspaceHeading();
 }
 
 async function switchWorkspace(projectId) {
   if (state.project?.id === projectId) return;
+  persistState();
   state.project = state.workspaces.find((item) => item.id === projectId) || await api(`/api/projects/${projectId}`);
-  state.activeDocumentId = null;
-  state.documents = [];
-  state.chatSession = null;
+  localStorage.setItem(storageKey("project_id"), state.project.id);
+  resetWorkspaceState();
+  loadProjectPersistedState(state.project.id);
   await refreshDocuments();
   renderWorkspaceList();
+  document.body.classList.remove("sidebar-open");
   addNotice(`已切换到研究任务：${state.project.name}`);
 }
 
@@ -277,21 +442,51 @@ function storageKey(name) {
   return `fangzhi_${state.appId}_${name}`;
 }
 
+function projectStorageKey(name, projectId = state.project?.id) {
+  return storageKey(`${name}_${projectId || "unassigned"}`);
+}
+
 function loadPersistedState() {
   try {
-    state.docStates = JSON.parse(localStorage.getItem(storageKey("doc_states")) || "{}");
-    state.activeDocumentId = localStorage.getItem(storageKey("active_document_id")) || null;
+    state.docStates = {};
+    state.activeDocumentId = null;
   } catch (_) {
     state.docStates = {};
   }
 }
 
+function loadProjectPersistedState(projectId) {
+  try {
+    state.docStates = JSON.parse(localStorage.getItem(projectStorageKey("doc_states", projectId)) || "{}");
+    state.activeDocumentId = localStorage.getItem(projectStorageKey("active_document_id", projectId)) || null;
+  } catch (_) {
+    state.docStates = {};
+    state.activeDocumentId = null;
+  }
+}
+
+function resetWorkspaceState() {
+  state.activeDocumentId = null;
+  state.documents = [];
+  state.chatSession = null;
+  state.topics = [];
+  state.outputs = [];
+  state.classificationReady = false;
+  state.currentTopic = null;
+  state.currentStep = "upload";
+  state.activeExtractionTaskId = null;
+  state.activeProcessingTaskId = null;
+  state.processingRunning = false;
+}
+
 function persistState() {
   try {
     saveActiveDocState();
-    localStorage.setItem(storageKey("doc_states"), JSON.stringify(state.docStates));
-    if (state.activeDocumentId) localStorage.setItem(storageKey("active_document_id"), state.activeDocumentId);
-    else localStorage.removeItem(storageKey("active_document_id"));
+    const projectId = state.project?.id;
+    if (!projectId) return;
+    localStorage.setItem(projectStorageKey("doc_states", projectId), JSON.stringify(state.docStates));
+    if (state.activeDocumentId) localStorage.setItem(projectStorageKey("active_document_id", projectId), state.activeDocumentId);
+    else localStorage.removeItem(projectStorageKey("active_document_id", projectId));
   } catch (_) {
     // localStorage can be disabled; the app still works in-memory.
   }
@@ -1087,10 +1282,18 @@ async function ensureProject() {
   if (cachedId) {
     try {
       state.project = await api(`/api/projects/${cachedId}`);
+      loadProjectPersistedState(state.project.id);
       return;
     } catch (_) {
       localStorage.removeItem(storageKey("project_id"));
     }
+  }
+
+  if (state.workspaces.length) {
+    state.project = state.workspaces[0];
+    localStorage.setItem(storageKey("project_id"), state.project.id);
+    loadProjectPersistedState(state.project.id);
+    return;
   }
 
   state.project = await api("/api/projects", {
@@ -1101,7 +1304,10 @@ async function ensureProject() {
       description: "底库上传、底表导出、专题总库生成、页面池和叙事单元提取项目",
     }),
   });
+  state.workspaces.unshift(state.project);
   localStorage.setItem(storageKey("project_id"), state.project.id);
+  loadProjectPersistedState(state.project.id);
+  renderWorkspaceList();
   addMessage("agent", `已创建项目：${state.project.name}`);
 }
 

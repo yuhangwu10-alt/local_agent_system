@@ -67,10 +67,12 @@ async def _platform_config(stage: str | None = None) -> tuple[dict | None, async
             None,
         )
         if selected is None:
-            # A profile with no stage restriction is an intentional generic
-            # fallback. Never route an OCR request to an LLM-only profile.
-            generic = [item for item in profiles if not (item.stages or [])]
-            selected = next((item for item in generic if item.is_default), None) or (generic[0] if generic else None)
+            # OCR is multimodal and must never silently fall back to a
+            # text-only channel. Other stages may use an explicitly generic
+            # profile as their normal fallback.
+            if stage != "ocr":
+                generic = [item for item in profiles if not (item.stages or [])]
+                selected = next((item for item in generic if item.is_default), None) or (generic[0] if generic else None)
     else:
         selected = next((item for item in profiles if item.is_default), None) or (profiles[0] if profiles else None)
     if selected is None:
